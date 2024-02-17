@@ -2689,56 +2689,56 @@ void OP_ED(uint8 code)
 {
 	
 	switch(code) {
-	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; break;			/* IN   B,(C)       */
-	case 0x41: OUT8(BC, B); break;						/* OUT  (C),B       */
+	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; WZ = BC + 1; break;			/* IN   B,(C)       */
+	case 0x41: OUT8(BC, B); WZ = BC + 1; break;						/* OUT  (C),B       */
 	case 0x42: SBC16(bc); break;						/* SBC  HL,BC       */
 	case 0x43: ea = FETCH16(); WM16(ea, &bc); WZ = ea + 1; break;		/* LD   (w),BC      */
 	case 0x44: NEG(); break;						/* NEG              */
 	case 0x45: RETN(); break;						/* RETN             */
 	case 0x46: im = 0; break;						/* im   0           */
 	case 0x47: LD_I_A(); break;						/* LD   i,A         */
-	case 0x48: C = IN8(BC); F = (F & CF) | SZP[C]; break;			/* IN   C,(C)       */
-	case 0x49: OUT8(BC, C); break;						/* OUT  (C),C       */
+	case 0x48: C = IN8(BC); F = (F & CF) | SZP[C]; WZ = BC + 1; break;			/* IN   C,(C)       */
+	case 0x49: OUT8(BC, C); WZ = BC + 1; break;						/* OUT  (C),C       */
 	case 0x4a: ADC16(bc); break;						/* ADC  HL,BC       */
 	case 0x4b: ea = FETCH16(); RM16(ea, &bc); WZ = ea + 1; break;		/* LD   BC,(w)      */
 	case 0x4c: NEG(); break;						/* NEG              */
 	case 0x4d: RETI(); break;						/* RETI             */
 	case 0x4e: im = 0; break;						/* im   0           */
 	case 0x4f: LD_R_A(); break;						/* LD   r,A         */
-	case 0x50: D = IN8(BC); F = (F & CF) | SZP[D]; break;			/* IN   D,(C)       */
-	case 0x51: OUT8(BC, D); break;						/* OUT  (C),D       */
+	case 0x50: D = IN8(BC); F = (F & CF) | SZP[D]; WZ = BC + 1; break;			/* IN   D,(C)       */
+	case 0x51: OUT8(BC, D); WZ = BC + 1; break;						/* OUT  (C),D       */
 	case 0x52: SBC16(de); break;						/* SBC  HL,DE       */
 	case 0x53: ea = FETCH16(); WM16(ea, &de); WZ = ea + 1; break;		/* LD   (w),DE      */
 	case 0x54: NEG(); break;						/* NEG              */
 	case 0x55: RETN(); break;						/* RETN             */
 	case 0x56: im = 1; break;						/* im   1           */
 	case 0x57: LD_A_I(); break;						/* LD   A,i         */
-	case 0x58: E = IN8(BC); F = (F & CF) | SZP[E]; break;			/* IN   E,(C)       */
-	case 0x59: OUT8(BC, E); break;						/* OUT  (C),E       */
+	case 0x58: E = IN8(BC); F = (F & CF) | SZP[E]; WZ = BC + 1; break;			/* IN   E,(C)       */
+	case 0x59: OUT8(BC, E); WZ = BC + 1; break;						/* OUT  (C),E       */
 	case 0x5a: ADC16(de); break;						/* ADC  HL,DE       */
 	case 0x5b: ea = FETCH16(); RM16(ea, &de); WZ = ea + 1; break;		/* LD   DE,(w)      */
 	case 0x5c: NEG(); break;						/* NEG              */
 	case 0x5d: RETI(); break;						/* RETI             */
 	case 0x5e: im = 2; break;						/* im   2           */
 	case 0x5f: LD_A_R(); break;						/* LD   A,r         */
-	case 0x60: H = IN8(BC); F = (F & CF) | SZP[H]; break;			/* IN   H,(C)       */
-	case 0x61: OUT8(BC, H); break;						/* OUT  (C),H       */
+	case 0x60: H = IN8(BC); F = (F & CF) | SZP[H]; WZ = BC + 1; break;			/* IN   H,(C)       */
+	case 0x61: OUT8(BC, H); WZ = BC + 1; break;						/* OUT  (C),H       */
 	case 0x62: SBC16(hl); break;						/* SBC  HL,HL       */
 	case 0x63: ea = FETCH16(); WM16(ea, &hl); WZ = ea + 1; break;		/* LD   (w),HL      */
 	case 0x64: NEG(); break;						/* NEG              */
 	case 0x65: RETN(); break;						/* RETN             */
 	case 0x66: im = 0; break;						/* im   0           */
 	case 0x67: RRD(); break;						/* RRD  (HL)        */
-	case 0x68: L = IN8(BC); F = (F & CF) | SZP[L]; break;			/* IN   L,(C)       */
-	case 0x69: OUT8(BC, L); break;						/* OUT  (C),L       */
+	case 0x68: L = IN8(BC); F = (F & CF) | SZP[L]; WZ = BC + 1; break;			/* IN   L,(C)       */
+	case 0x69: OUT8(BC, L); WZ = BC + 1; break;						/* OUT  (C),L       */
 	case 0x6a: ADC16(hl); break;						/* ADC  HL,HL       */
 	case 0x6b: ea = FETCH16(); RM16(ea, &hl); WZ = ea + 1; break;		/* LD   HL,(w)      */
 	case 0x6c: NEG(); break;						/* NEG              */
 	case 0x6d: RETI(); break;						/* RETI             */
 	case 0x6e: im = 0; break;						/* im   0           */
 	case 0x6f: RLD(); break;						/* RLD  (HL)        */
-	case 0x70: {uint8 res = IN8(BC); F = (F & CF) | SZP[res];} break;	/* IN   F,(C)       */
-	case 0x71: OUT8(BC, 0); break;						/* OUT  (C),0       */
+	case 0x70: {uint8 res = IN8(BC); F = (F & CF) | SZP[res]; WZ = BC + 1;} break;	/* IN   F,(C)       */
+	case 0x71: OUT8(BC, 0); WZ = BC + 1; break;						/* OUT  (C),0       */
 	case 0x72: SBC16(sp); break;						/* SBC  HL,SP       */
 	case 0x73: ea = FETCH16(); WM16(ea, &sp); WZ = ea + 1; break;		/* LD   (w),SP      */
 	case 0x74: NEG(); break;						/* NEG              */
