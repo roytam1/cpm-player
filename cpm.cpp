@@ -1924,6 +1924,7 @@ inline uint8 SET(uint8 bit, uint8 value)
 	INI(); \
 	if(B != 0) { \
 		PC -= 2; \
+		WZ = PC + 1; \
 	} \
 } while(0)
 
@@ -1931,6 +1932,7 @@ inline uint8 SET(uint8 bit, uint8 value)
 	OUTI(); \
 	if(B != 0) { \
 		PC -= 2; \
+		WZ = PC + 1; \
 	} \
 } while(0)
 
@@ -1954,6 +1956,7 @@ inline uint8 SET(uint8 bit, uint8 value)
 	IND(); \
 	if(B != 0) { \
 		PC -= 2; \
+		WZ = PC + 1; \
 	} \
 } while(0)
 
@@ -1961,6 +1964,7 @@ inline uint8 SET(uint8 bit, uint8 value)
 	OUTD(); \
 	if(B != 0) { \
 		PC -= 2; \
+		WZ = PC + 1; \
 	} \
 } while(0)
 
