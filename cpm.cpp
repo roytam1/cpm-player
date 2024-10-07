@@ -210,6 +210,9 @@ void main(int argc, char *argv[])
 	WM8 (0x0024, 0xc9);	// ENASLT
 	WM8 (0x0030, 0xc9);	// CALLF
 	
+	WM8 (0xf27c, 0xc9);	// HL=DE*BC
+	WM8 (0xf27f, 0xc9);	// BC=BC/DE, HL=rest
+	
 	WM8 (0xf30f, 0x80);	// KANJITABLE
 	WM8 (0xf310, 0xa0);
 	WM8 (0xf311, 0xe0);
@@ -226,6 +229,8 @@ void main(int argc, char *argv[])
 	WM8 (0xf343, 3);	// RAMAD2
 	WM8 (0xf344, 3);	// RAMAD3
 	WM8 (0xf348, 1);	// MASTERS
+	
+	WM8 (0xf37d, 0xc9);	// BDOS
 	
 	WM8 (0xf380, 0xc9);	// RDPRIM
 	WM8 (0xf385, 0xc9);	// WRPRIM
@@ -1500,6 +1505,18 @@ PINLIN:
 		WM16(SP, IX);
 	case 0x15f: // EXTROM
 		msx_sub(IX);
+		break;
+	case 0xf27c: // HL=DE*BC
+		HL = DE * BC;
+		break;
+	case 0xf27f: // BC=BC/DE, HL=rest
+		if(DE) {
+			HL = BC % DE;
+			BC = BC / DE;
+		}
+		break;
+	case 0xf37d: // BDOS
+		cpm_bdos();
 		break;
 	case 0xf380: // RDPRIM
 		OUT8(0xa8, A);
