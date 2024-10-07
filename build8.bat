@@ -7,6 +7,7 @@ set path="%ProgramFiles(x86)%\Microsoft Visual Studio 9.0\Common7\IDE";%PATH%
 :start
 
 devenv.com cpm.vcproj /Rebuild "Release|Win32"
+devenv.com msx.vcproj /Rebuild "Release|Win32"
 
 pause
 echo on

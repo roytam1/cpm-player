@@ -1,9 +1,10 @@
 CP/M Player for Win32 console
-								11/28/2012
+MSX-DOS Player for Win32 console
+								10/06/2024
 
 ----- What's this
 
-This is CP/M emulator running on Win32 command prompt.
+This is CP/M and MSX-DOS1 emulator running on Win32 command prompt.
 
 
 ----- How to use

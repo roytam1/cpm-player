@@ -6,11 +6,13 @@
 */
 
 #include <windows.h>
-#include <tchar.h>
+//#include <tchar.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <conio.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <io.h>
 #include <mbctype.h>
 #include "cpm.h"
@@ -18,10 +20,51 @@
 void main(int argc, char *argv[])
 {
 	if(argc < 2) {
+#ifdef _MSX
+		fprintf(stderr, "MSX-DOS Player for Win32 console\n\n");
+		fprintf(stderr, "Usage: MSX (command file) [opions]\n");
+#else
 		fprintf(stderr, "CP/M Player for Win32 console\n\n");
 		fprintf(stderr, "Usage: CPM (command file) [opions]\n");
+#endif
 		return;
 	}
+	
+	// init memory
+	memset(mem, 0, sizeof(mem));
+	
+#ifdef _MSX
+	// fill dummy BIOS roms with C9h (RET)
+	memset(bios, 0xc9, sizeof(bios));
+	memset(sub, 0xc9, sizeof(sub));
+	memset(disk, 0xc9, sizeof(disk));
+	memset(rd_dummy, 0xff, sizeof(rd_dummy));
+	
+	for(int s = 0; s < 4; s++) {
+		for(int p = 0; p < 4; p++) {
+			rd_bank[s][p] = rd_dummy;
+			wr_bank[s][p] = wr_dummy;
+		}
+	}
+/*
+		Slot0	Slot1	Slot2	Slot3
+	0000H	BIOS	SUB		RAM
+	4000H	BIOS	DISK		RAM
+	8000H				RAM
+	C000H				RAM
+*/
+	rd_bank[0][0] = bios;
+	rd_bank[0][1] = bios + 0x4000;
+	rd_bank[1][0] = sub;
+	rd_bank[1][1] = disk;
+	set_mapper(0, 3);
+	set_mapper(1, 2);
+	set_mapper(2, 1);
+	set_mapper(3, 0);
+	slot[0] = slot[1] = slot[2] = slot[3] = 3;
+#endif
+	
+	// load com file
 	FILE* fp = fopen(argv[1], "rb");
 	if(fp == NULL) {
 		char cmd[256];
@@ -32,79 +75,84 @@ void main(int argc, char *argv[])
 		fprintf(stderr, "command not found\n");
 		return;
 	}
-	memset(mem, 0, sizeof(mem));
-	fread(mem + 0x100, 0xff00, 1, fp);
+	uint8 buffer[0xff00];
+	memset(buffer, 0, sizeof(buffer));
+	fread(buffer, 0xff00, 1, fp);
+	cpm_memcpy(0x100, buffer, 0xff00);
 	fclose(fp);
 	
-	// init cp/m
+	// init CP/M
 	user_id = default_drive = 0;
 	login_drive = 1;
 	delimiter = 0x24;
+	verify = 0;
 	memset(read_only, 0, sizeof(read_only));
 	dma_addr = 0x80;
 	find_num = find_idx = 0;
-	memset(file_ptr, 0, sizeof(file_ptr));
-	memset(file_path, 0, sizeof(file_path));
+	for(int i = 0; i < MAX_FILES; i++) {
+		file_info[i].fd = -1;
+		file_info[i].path[0] = '\0';
+	}
 	
 	// init zero page
-	mem[0x00] = 0xc3;
-	mem[0x01] = (BIOS_BASE + 3) & 0xff;
-	mem[0x02] = (BIOS_BASE + 3) >> 8;
-	mem[0x03] = 0x95;
-	mem[0x04] = 0;
-	mem[0x05] = 0xc3;
-	mem[0x06] = (BDOS_BASE + 6) & 0xff;
-	mem[0x07] = (BDOS_BASE + 6) >> 8;
+	WM8(0x00, 0xc3);
+	WM8(0x01, (BIOS_BASE + 3) & 0xff);
+	WM8(0x02, (BIOS_BASE + 3) >> 8);
+	WM8(0x03, 0x95);
+	WM8(0x04, 0);
+	WM8(0x05, 0xc3);
+	WM8(0x06, (BDOS_BASE + 6) & 0xff);
+	WM8(0x07, (BDOS_BASE + 6) >> 8);
 	for(int i = 0; i < 2; i++) {
 		// fcb
-		uint8 *pd = mem + 0x5c + 0x10 * i;
-		uint8 *pf = pd + 1;
-		uint8 *pe = pd + 9;
-		pd[0] = 0;
-		memset(pf, 0x20, 8);
-		memset(pe, 0x20, 3);
+		uint16 pd = 0x5c + 0x10 * i;
+		uint16 pf = pd + 1;
+		uint16 pe = pd + 9;
+		WM8(pd, 0);
+		cpm_memset(pf, 0x20, 8);
+		cpm_memset(pe, 0x20, 3);
 		if(argc < i + 3) {
 			continue;
 		}
-		char buf[256], *f = buf, *e;
+		char buf[MAX_PATH], *f = buf, *e;
 		memset(buf, 0, sizeof(buf));
 		strcpy(buf, argv[i + 2]);
 		if(f[1] == ':') {
 			if('A' <= f[0] && f[0] <= 'P') {
-				pd[0] = f[0] - 'A' + 1;
+				WM8(pd, f[0] - 'A' + 1);
 			} else if('a' <= f[0] && f[0] <= 'p') {
-				pd[0] = f[0] - 'a' + 1;
+				WM8(pd, f[0] - 'a' + 1);
 			}
 			f += 2;
 		}
-		if(e = strstr(f, ".")) {
+		if(e = strrchr(f, '.')) {
 			e[0] = '\0';
 			e++;
 		}
 		int len = strlen(f);
 		if(len > 8) len = 8;
-		memcpy(pf, f, len);
+		cpm_memcpy(pf, f, len);
 		if(e) {
 			len = strlen(e);
 			if(len > 3) len = 3;
-			memcpy(pe, e, len);
+			cpm_memcpy(pe, e, len);
 		}
 		for(int j = 0; j < 8; j++) {
-			if(pf[j] == '*') {
+			if(RM8(pf + j) == '*') {
 				for(int k = j; k < 8; k++) {
-					pf[k] = '?';
+					WM8(pf + k, '?');
 				}
-			} else if(islower(pf[j])) {
-				pf[j] = toupper(pf[j]);
+			} else if(islower(RM8(pf + j))) {
+				WM8(pf + j, toupper(RM8(pf + j)));
 			}
 		}
 		for(int j = 0; j < 3; j++) {
-			if(pe[j] == '*') {
+			if(RM8(pe + j) == '*') {
 				for(int k = j; k < 3; k++) {
-					pe[k] = '?';
+					WM8(pe + k, '?');
 				}
-			} else if(islower(pe[j])) {
-				pe[j] = toupper(pe[j]);
+			} else if(islower(RM8(pe + j))) {
+				WM8(pe + j, toupper(RM8(pe + j)));
 			}
 		}
 		
@@ -125,26 +173,97 @@ void main(int argc, char *argv[])
 			}
 		}
 		if(len > 126) len = 126;
-		mem[0x80] = len;
-		memcpy(mem + 0x81, cmd, len);
+		WM8(0x80, len);
+		cpm_memcpy(0x81, cmd, len);
 	}
 	
 	// init cpp
-	mem[CPP_BASE] = 0x76;
+	WM8(CPP_BASE, 0x76);
 	
 	// init bdos
-	mem[BDOS_BASE + 6] = 0xc3;
-	mem[BDOS_BASE + 7] = BDOS_BASE_2 & 0xff;
-	mem[BDOS_BASE + 8] = BDOS_BASE_2 >> 8;;
-	mem[BDOS_BASE_2] = 0xc9;
+	WM8(BDOS_BASE + 6, 0xc3);
+	WM8(BDOS_BASE + 7, BDOS_BASE_2 & 0xff);
+	WM8(BDOS_BASE + 8, BDOS_BASE_2 >> 8);
+	WM8(BDOS_BASE_2, 0xc9);
 	
 	// init bios
 	for(int i = 0; i < 25; i++) {
-		mem[BIOS_BASE + i * 3 + 0] = 0xc3;
-		mem[BIOS_BASE + i * 3 + 1] = (BIOS_BASE_2 + i) & 0xff;
-		mem[BIOS_BASE + i * 3 + 2] = (BIOS_BASE_2 + i) >> 8;
-		mem[BIOS_BASE_2 + i] = 0xc9;
+		WM8(BIOS_BASE + i * 3 + 0, 0xc3);
+		WM8(BIOS_BASE + i * 3 + 1, (BIOS_BASE_2 + i) & 0xff);
+		WM8(BIOS_BASE + i * 3 + 2, (BIOS_BASE_2 + i) >> 8);
+		WM8(BIOS_BASE_2 + i, 0xc9);
 	}
+	
+#ifdef _MSX
+	bios[0x002b] = 0;	// Basic ROM version
+	bios[0x002c] = 0;	// Basic ROM version
+	bios[0x002d] = 1;	// MSX version number
+	bios[0x002e] = 0;	// MSX-MIDI not present
+	bios[0x002f] = 0;	// Reserved
+	
+	sub [0x0000] = 'C';
+	sub [0x0001] = 'D';
+	
+	WM8 (0x000c, 0xc9);	// RDSLT
+	WM8 (0x0014, 0xc9);	// WRSLT
+	WM8 (0x001c, 0xc9);	// CALSLT
+	WM8 (0x0024, 0xc9);	// ENASLT
+	WM8 (0x0030, 0xc9);	// CALLF
+	
+	WM8 (0xf30f, 0x80);	// KANJITABLE
+	WM8 (0xf310, 0xa0);
+	WM8 (0xf311, 0xe0);
+	WM8 (0xf312, 0xfd);
+	
+	WM8 (0xf320, 0x0e);	// dummy routine for DISKVE
+	WM8 (0xf321, 0x02);	// (C=2: Abort)
+	WM8 (0xf322, 0xc9);	// dummy routine for BREAKV
+	WM16(0xf323, 0xf320);	// DISKVE
+	WM16(0xf325, 0xf322);	// BREAKV
+	
+	WM8 (0xf341, 3);	// RAMAD0
+	WM8 (0xf342, 3);	// RAMAD1
+	WM8 (0xf343, 3);	// RAMAD2
+	WM8 (0xf344, 3);	// RAMAD3
+	WM8 (0xf348, 1);	// MASTERS
+	
+	WM8 (0xf380, 0xc9);	// RDPRIM
+	WM8 (0xf385, 0xc9);	// WRPRIM
+	WM8 (0xf38c, 0xc9);	// CLPRIM
+	
+	WM8 (0xf3ae, 39);	// LINL40
+	WM8 (0xf3af, 31);	// LINL32
+	WM8 (0xf3b0, 79);	// LINLEN
+	WM8 (0xf3b1, 24);	// CRTCNT
+	
+	WM8 (0xfaf5, 0);	// DPPAGE
+	WM8 (0xfaf6, 0);	// ACPAGE
+	WM8 (0xfaf8, 1);	// EXBRSA
+	
+	WM8 (0xfb20, 1);	// LSTMOD
+	
+	WM16(0xfc48, 0x8000);	// BOTTOM
+	WM16(0xfc4a, CPP_BASE);	// HIMEM
+	
+	WM8 (0xfcc1, 0);	// EXPTBL #1
+	WM8 (0xfcc2, 0);	// EXPTBL #2
+	WM8 (0xfcc3, 0);	// EXPTBL #3
+	WM8 (0xfcc4, 0);	// EXPTBL #4
+	WM8 (0xfcc5, 0);	// SLTTBL #1
+	WM8 (0xfcc6, 0);	// SLTTBL #1
+	WM8 (0xfcc7, 0);	// SLTTBL #1
+	WM8 (0xfcc8, 0);	// SLTTBL #1
+	
+	WM8 (0xffca, 0xc9);	// FCALL
+	WM8 (0xffcf, 0xc9);	// DISINT
+	WM8 (0xffd4, 0xc9);	// ENAINT
+	
+	kanji_mode = 0;
+	kanji1_hi = kanji1_lo = kanji1_idx = 0;
+	kanji2_hi = kanji2_lo = kanji2_idx = 0;
+	
+	reset_rtc();
+#endif
 	
 	// init console
 	cons_init();
@@ -232,8 +351,8 @@ void main(int argc, char *argv[])
 	halt = false;
 	after_ei = after_ldair = false;
 	
-	mem[SP + 0] = CPP_BASE & 0xff;
-	mem[SP + 1] = CPP_BASE >> 8;
+	WM8(SP + 0, CPP_BASE & 0xff);
+	WM8(SP + 1, CPP_BASE >> 8);
 	
 	while(!halt) {
 		after_ei = after_ldair = false;
@@ -255,8 +374,8 @@ void main(int argc, char *argv[])
 	
 	// close opened file
 	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_ptr[i] != NULL) {
-			fclose(file_ptr[i]);
+		if(file_info[i].fd != -1) {
+			_close(file_info[i].fd);
 		}
 	}
 }
@@ -269,73 +388,82 @@ void cpm_bios(int num)
 {
 	switch(num)
 	{
-	case 0:
+	case 0x00:
 		// BOOT
 		halt = true;
 		break;
-	case 1:
+	case 0x01:
 		// WBOOT
 		halt = true;
 		break;
-	case 2:
+	case 0x02:
 		// CONST
 		A = cons_kbhit() ? 0xff : 0;
 		Sleep(0);
 		break;
-	case 3:
+	case 0x03:
 		// CONIN
 		A = cons_getch();
 		break;
-	case 4:
+	case 0x04:
 		// CONOUT
 		cons_putch(C);
 		break;
-	case 5:
+	case 0x05:
 		// LIST
 		break;
-	case 6:
+	case 0x06:
 		// AUXOUT
 		break;
-	case 7:
+	case 0x07:
 		// AUXIN
 		break;
+	default:
+		fprintf(stderr, "BIOS %02Xh\n", num);
+		exit(1);
 	}
 }
 
 void cpm_bdos()
 {
-	char string[256], path[256];
+	char string[512], path[MAX_PATH];
 	int len, drive, size;
 	uint32 record;
-	WIN32_FIND_DATA fd;
+#ifdef _MSX
+	uint8 buffer[0x10000];
+	SYSTEMTIME sTime;
+#else
+	uint8 buffer[128];
+#endif
+	WIN32_FIND_DATA find;
 	HANDLE hFind;
-	FILE* fp;
+	int fd;
 	
 	switch(C)
 	{
-	case 0:
+	case 0x00:
 		// system reset
 		halt = true;
 		break;
-	case 1:
+	case 0x01:
 		// console input
 		A = cons_getche();
 		break;
-	case 2:
+	case 0x02:
 		// console output
 		cons_putch(E);
 		break;
-	case 3:
+	case 0x03:
 		// auxiliary (reader) input
 		A = 0x1a;
 		break;
-	case 4:
+	case 0x04:
 		// auxiliary (punch) output
 		break;
-	case 5:
+	case 0x05:
 		// printer output
 		break;
-	case 6:
+	case 0x06:
 		// direct console I/O
 		if(E == 0xff) {
 			if(cons_kbhit()) {
@@ -353,63 +481,71 @@ void cpm_bdos()
 			cons_putch(E);
 		}
 		break;
-	case 7:
+	case 0x07:
+#ifdef _MSX
+		A = cons_getch();
+#else
 		// auxiliary input status
 		A = 0;
+#endif
 		break;
-	case 8:
+	case 0x08:
+#ifdef _MSX
+		A = cons_getch();
+#else
 		// auxiliary output status
 		A = 0xff;
+#endif
 		break;
-	case 9:
+	case 0x09:
 		// output string
 		for(int i = 0; i < 256; i++) {
-			if(mem[DE + i] == delimiter) {
+			if(RM8(DE + i) == delimiter) {
 				break;
 			}
-			cons_putch(mem[DE + i]);
+			cons_putch(RM8(DE + i));
 		}
 		break;
-	case 10:
+	case 0x0a:
 		// buffered console input
 		if(gets(string) != NULL) {
 			len = strlen(string);
 			if(len > 0 && string[len - 1] == 0x0d) len--;
-			if(len > mem[DE]) len = mem[DE];
+			if(len > RM8(DE)) len = RM8(DE);
 		} else {
 			len = 0;
 		}
-		mem[DE + 1] = len;
-		memcpy(mem + DE + 2, string, len);
-		mem[DE + len + 2] = 0;
+		WM8(DE + 1, len);
+		cpm_memcpy(DE + 2, string, len);
+		WM8(DE + len + 2, 0);
 		break;
-	case 11:
+	case 0x0b:
 		// console status
 		A = cons_kbhit() ? 0xff : 0;
 		Sleep(0);
 		break;
-	case 12:
+	case 0x0c:
 		// return version number (v2.2)
 		A = L = 0x22;
 		break;
-	case 13:
+	case 0x0d:
 		// reset discs
 		memset(read_only, 0, sizeof(read_only));
 		dma_addr = 0x80;
 		find_num = find_idx = 0;
 		A = 0;
-		if((hFind = FindFirstFile(_T("*.*"), &fd)) != INVALID_HANDLE_VALUE) {
+		if((hFind = FindFirstFile("$*.*", &find)) != INVALID_HANDLE_VALUE) {
 			do {
-				if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+				if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
 					A = 0xff;
 					break;
 				}
 			}
-			while(FindNextFile(hFind, &fd));
+			while(FindNextFile(hFind, &find));
 			FindClose(hFind);
 		}
 		break;
-	case 14:
+	case 0x0e:
 		// select disc
 		if(E < MAX_DRIVES) {
 			default_drive = E;
@@ -419,24 +555,35 @@ void cpm_bdos()
 		A = 0xff;
 		H = 4;
 		break;
-	case 15:
+	case 0x0f:
 		// open file
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			cpm_create_path(drive, mem + DE + 1, path);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 			if((size = cpm_get_file_size(path)) >= 0) {
-				int ex = (mem[DE + 12] & 0x1f) | (mem[DE + 13] << 5);
+#ifdef _MSX
+				WM32(DE + 16, size);
+				WM32(DE + 20, 0);
+				WM32(DE + 22, 0);
+				for(int i = 0; i < MAX_FILES; i++) {
+					if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+						WM16(DE + 20, file_info[i].fatDate);
+						WM16(DE + 22, file_info[i].fatTime);
+						break;
+					}
+				}
+				WM8 (DE + 24, 0x40);
+				WM8 (DE + 25, 0);
+				WM16(DE + 26, 0);
+				WM16(DE + 28, 0);
+				WM16(DE + 30, 0);
+#else
+				int ex = cpm_get_current_extent(DE);
 				int block = size - ex * 16384;
-				for(int i = 0; i < 16; i++) {
-					mem[DE + i + 16] = (block > i * 1024) ? i + 1 : 0;
-				}
-				mem[DE + 14] = 0;
-				mem[DE + 15] = 128;
-				mem[DE + 12] = mem[DE + 13] = mem[DE + 32] = 0;
-				if(mem[DE + 32] == 0xff) {
-					mem[DE + 32] = (block < 0) ? 0 : (block < 16384) ? ((block >> 7) & 0xff) : 127;
-				}
-//				memcpy(mem + 0x80, mem + DE, 32);
+				cpm_set_alloc_vector(DE, block);
+#endif
+				cpm_set_current_record(DE, 0);
+				cpm_set_record_count(DE, 128);
 				A = 0;
 				return;
 			}
@@ -444,18 +591,15 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 16:
+	case 0x10:
 		// close file
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			cpm_create_path(drive, mem + DE + 1, path);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 			if((size = cpm_get_file_size(path)) >= 0) {
-				int ex = (mem[DE + 12] & 0x1f) | (mem[DE + 13] << 5);
+				int ex = cpm_get_current_extent(DE);
 				int block = size - ex * 16384;
-				for(int i = 0; i < 16; i++) {
-					mem[DE + i + 16] = (block > i * 1024) ? i + 1 : 0;
-				}
-//				memcpy(mem + 0x80, mem + DE, 32);
+				cpm_set_alloc_vector(DE, block);
 				A = 0;
 				return;
 			}
@@ -463,17 +607,27 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 17:
+	case 0x11:
 		// search for first
+		memset(find_files, 0, sizeof(find_files));
 		find_num = find_idx = 0;
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			if((hFind = FindFirstFile(_T("*.*"), &fd)) != INVALID_HANDLE_VALUE) {
+			if((hFind = FindFirstFile("*.*", &find)) != INVALID_HANDLE_VALUE) {
 				do {
-					if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-						char file[256], ext[256];
-						WideCharToMultiByte(CP_THREAD_ACP, 0, fd.cFileName, -1, file, 256, NULL, NULL);
-						char *pt = strstr(file, ".");
+//#ifdef _MSX
+//					if(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+//						if(strcmp(find.cFileName, ".") == 0 || strcmp(find.cFileName, "..") == 0) {
+//							continue;
+//						}
+//					}
+//#else
+					if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+//#endif
+					{
+						char file[MAX_PATH], ext[MAX_PATH];
+						strcpy(file, find.cFileName);
+						char *pt = strrchr(file, '.');
 						if(pt) {
 							strcpy(ext, pt + 1);
 							pt[0] = '\0';
@@ -487,7 +641,7 @@ void cpm_bdos()
 							memcpy(cmp + 8, ext, strlen(ext));
 							int flag = 1;
 							for(int i = 0; i < 11; i++) {
-								char v1 = mem[DE + i + 1];
+								char v1 = RM8(DE + i + 1);
 								char v2 = cmp[i];
 								v1 = ('a' <= v1 && v1 <= 'z') ? v1 + 'A' - 'a' : v1;
 								v2 = ('a' <= v2 && v2 <= 'z') ? v2 + 'A' - 'a' : v2;
@@ -502,43 +656,66 @@ void cpm_bdos()
 									find_files[find_num][i] = ('a' <= v && v <= 'z') ? v + 'A' - 'a' : v;
 								}
 								find_files[find_num][11] = drive;
+#ifdef _MSX
+								WIN32_FILE_ATTRIBUTE_DATA fad;
+								HANDLE hFile = CreateFile(find.cFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+								if(hFile != INVALID_HANDLE_VALUE) {
+									if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
+										FILETIME time;
+										WORD fatDate, fatTime;
+										FileTimeToLocalFileTime(&fad.ftLastWriteTime, &time);
+										FileTimeToDosDateTime(&time, &fatDate, &fatTime);
+										find_files[find_num][22] = (fatTime >> 0) & 0xff;
+										find_files[find_num][23] = (fatTime >> 8) & 0xff;
+										find_files[find_num][24] = (fatDate >> 0) & 0xff;
+										find_files[find_num][25] = (fatDate >> 8) & 0xff;
+									}
+									CloseHandle(hFile);
+								}
+								if(find.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
+									find_files[find_num][32] |= 0x01;
+								}
+								if(find.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) {
+									find_files[find_num][32] |= 0x02;
+								}
+								if(find.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) {
+									find_files[find_num][32] |= 0x04;
+								}
+								if(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+									find_files[find_num][32] |= 0x10;
+								}
+								if(find.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) {
+									find_files[find_num][32] |= 0x20;
+								}
+#endif
 								find_num++;
 							}
 						}
 					}
 				}
-				while(FindNextFile(hFind, &fd));
+				while(FindNextFile(hFind, &find));
 				FindClose(hFind);
 			}
-			if(find_num > 0) {
-				cpm_create_path(find_files[find_idx][11], find_files[find_idx], path);
-				if((size = cpm_get_file_size(path)) >= 0) {
-					memset(mem + dma_addr, 0, 32);
-					memcpy(mem + dma_addr + 1, find_files[find_idx], 11);
-					mem[dma_addr + 13] = (size < 16384) ? ((size >> 7) & 0xff) : 127;
-					for(int i = 0; i < 16; i++) {
-						mem[dma_addr + i + 16] = (size > i * 1024) ? i + 1 : 0;
-					}
-					find_idx++;
-					A = 0;
-					return;
-				}
-			}
 		}
-		A = 0xff;
-		H = 0;
-		break;
-	case 18:
+	case 0x12:
 		// search for next
 		if(find_idx < find_num) {
 			cpm_create_path(find_files[find_idx][11], find_files[find_idx], path);
 			if((size = cpm_get_file_size(path)) >= 0) {
-				memset(mem + dma_addr, 0, 32);
-				memcpy(mem + dma_addr + 1, find_files[find_idx], 11);
-				mem[dma_addr + 13] = (size < 16384) ? ((size >> 7) & 0xff) : 127;
-				for(int i = 0; i < 16; i++) {
-					mem[dma_addr + i + 16] = (size > i * 1024) ? i + 1 : 0;
-				}
+				cpm_memset(dma_addr, 0, 32);
+#ifdef _MSX
+//				find_files[find_idx][11] = find_files[find_idx][32];
+				find_files[find_idx][12] = find_files[find_idx][32];
+				find_files[find_idx][28] = (size >>  0) & 0xff;
+				find_files[find_idx][29] = (size >>  8) & 0xff;
+				find_files[find_idx][30] = (size >> 16) & 0xff;
+				find_files[find_idx][31] = (size >> 24) & 0xff;
+				cpm_memcpy(dma_addr + 1, find_files[find_idx], 32);
+#else
+				cpm_memcpy(dma_addr + 1, find_files[find_idx], 11);
+				WM8(dma_addr + 13, (size < 16384) ? ((size >> 7) & 0xff) : 127);
+				cpm_set_alloc_vector(dma_addr, size);
+#endif
 				find_idx++;
 				A = 0;
 				return;
@@ -547,16 +724,14 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 19:
+	case 0x13:
 		// delete file
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				cpm_create_path(drive, mem + DE + 1, path);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 				cpm_close_file(path);
-				wchar_t path_wc[256];
-				MultiByteToWideChar(CP_THREAD_ACP, 0, path, -1, path_wc, 256); 
-				if(DeleteFile(path_wc)) {
+				if(DeleteFile(path)) {
 					A = 0;
 					return;
 				}
@@ -565,26 +740,22 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 20:
+	case 0x14:
 		// read next record
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			record = mem[DE + 32] & 0x7f;
-			record += (mem[DE + 12] & 0x1f) << 7;
-			record += mem[DE + 13] << 12;
-			record += mem[DE + 14] << 20;
-			cpm_create_path(drive, mem + DE + 1, path);
-			if((fp = cpm_get_file_ptr(path)) != NULL) {
-				if(fseek(fp, record * 128, SEEK_SET) == 0) {
-					if((size = fread(mem + dma_addr, 1, 128, fp)) != 0) {
-						if (size < 128) {
-							memset(mem + dma_addr + size, 0x1a, 128 - size);
+			record = cpm_get_current_record(DE);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+			if((fd = cpm_get_file_desc(path)) != -1) {
+				if(_lseek(fd, record * 128, SEEK_SET) != -1) {
+					if((size = _read(fd, buffer, 128)) > 0) {
+						if(size < 128) {
+//							memset(buffer + size, 0x00, 128 - size); // MSX-DOS2
+							memset(buffer + size, 0x1a, 128 - size);
 						}
+						cpm_memcpy(dma_addr, buffer, 128);
 						record++;
-						mem[DE + 32] = record & 0x7f;
-						mem[DE + 12] = (record >> 7) & 0x1f;
-						mem[DE + 13] = (record >> 12) & 0xff;
-						mem[DE + 14] = (record >> 20) & 0xff;
+						cpm_set_current_record(DE, record);
 						A = 0;
 						return;
 					}
@@ -593,24 +764,19 @@ void cpm_bdos()
 		}
 		A = 1;
 		break;
-	case 21:
+	case 0x15:
 		// write next record
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				record = mem[DE + 32] & 0x7f;
-				record += (mem[DE + 12] & 0x1f) << 7;
-				record += mem[DE + 13] << 12;
-				record += mem[DE + 14] << 20;
-				cpm_create_path(drive, mem + DE + 1, path);
-				if((fp = cpm_get_file_ptr(path)) != NULL) {
-					if(fseek(fp, record * 128, SEEK_SET) == 0) {
-						if(fwrite(mem + dma_addr, 128, 1, fp) != 0) {
+				record = cpm_get_current_record(DE);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+				if((fd = cpm_get_file_desc(path)) != -1) {
+					if(_lseek(fd, record * 128, SEEK_SET) != -1) {
+						cpm_memcpy(buffer, dma_addr, 128);
+						if(_write(fd, buffer, 128) == 128) {
 							record++;
-							mem[DE + 32] = record & 0x7f;
-							mem[DE + 12] = (record >> 7) & 0x1f;
-							mem[DE + 13] = (record >> 12) & 0xff;
-							mem[DE + 14] = (record >> 20) & 0xff;
+							cpm_set_current_record(DE, record);
 							A = 0;
 							return;
 						}
@@ -620,20 +786,19 @@ void cpm_bdos()
 		}
 		A = 1;
 		break;
-	case 22:
+	case 0x16:
 		// create file
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				cpm_create_path(drive, mem + DE + 1, path);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 				cpm_close_file(path);
 				for(int i = 0; i < MAX_FILES; i++) {
-					if(file_ptr[i] == NULL) {
-						if((file_ptr[i] = fopen(path, "w+b")) != NULL) {
-							strcpy(file_path[i], path);
-							mem[DE + 14] = 0;
-							mem[DE + 15] = 128;
-							mem[DE + 12] = mem[DE + 13] = mem[DE + 32] = 0;
+					if(file_info[i].fd == -1) {
+						if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE)) != -1) {
+							strcpy(file_info[i].path, path);
+							cpm_set_current_record(DE, 0);
+							cpm_set_record_count(DE, 128);
 							A = 0;
 							return;
 						}
@@ -645,24 +810,18 @@ void cpm_bdos()
 		A = 0xff;
 		H = 4;
 		break;
-	case 23:
+	case 0x17:
 		// rename file
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				cpm_create_path(drive, mem + DE + 1, path);
-				cpm_create_path(drive, mem + DE + 17, string);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 17), string);
 				if((size = cpm_get_file_size(path)) >= 0) {
-					int ex = (mem[DE + 12] & 0x1f) | (mem[DE + 13] << 5);
+					int ex = cpm_get_current_extent(DE);
 					int block = size - ex * 16384;
-					for(int i = 0; i < 16; i++) {
-						mem[DE + i + 16] = (block > i * 1024) ? i + 1 : 0;
-					}
-//					memcpy(mem + 0x80, mem + DE, 32);
-					wchar_t path_wc[256], new_wc[256];
-					MultiByteToWideChar(CP_THREAD_ACP, 0, path, -1, path_wc, 256); 
-					MultiByteToWideChar(CP_THREAD_ACP, 0, string, -1, new_wc, 256); 
-					if(MoveFile(path_wc, new_wc)) {
+					cpm_set_alloc_vector(DE, block);
+					if(MoveFile(path, string)) {
 						A = 0;
 						return;
 					}
@@ -672,25 +831,29 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 24:
+	case 0x18:
 		// return bitmap of logged-in drives
 		HL = login_drive;
 		break;
-	case 25:
+	case 0x19:
 		// return current drive
 		A = default_drive;
 		break;
-	case 26:
+	case 0x1a:
 		// set dma address
 		dma_addr = DE;
 		break;
-	case 28:
+	case 0x1b:
+#ifdef _MAX
+		A = 0xff;
+#else
 		// software write-protect current disc
 		if(default_drive < MAX_DRIVES) {
 			read_only[default_drive] = 1;
 		}
+#endif
 		break;
-	case 29:
+	case 0x1c:
 		// return bitmap of read-only drives
 		HL = 0;
 		for(int i = 0; i < 16; i++) {
@@ -699,16 +862,16 @@ void cpm_bdos()
 			}
 		}
 		break;
-	case 30:
+	case 0x1d:
 		// set file attributes
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				cpm_create_path(drive, mem + DE + 1, path);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 				if((size = cpm_get_file_size(path)) >= 0) {
-					int ex = (mem[DE + 12] & 0x1f) | (mem[DE + 13] << 5);
+					int ex = cpm_get_current_extent(DE);
 					int block = size - ex * 16384;
-					mem[DE + 32] = (block < 0) ? 0 : (block < 16384) ? ((block >> 7) & 0xff) : 127;
+					WM8(DE + 32, (block < 0) ? 0 : (block < 16384) ? ((block >> 7) & 0xff) : 127);
 					A = 0;
 					return;
 				}
@@ -717,7 +880,7 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 32:
+	case 0x20:
 		// get/set user number
 		if(E == 0xff) {
 			A = user_id;
@@ -725,22 +888,21 @@ void cpm_bdos()
 			user_id = E;
 		}
 		break;
-	case 33:
+	case 0x21:
 		// random access read record
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			record = mem[DE + 33] | (mem[DE + 34] << 8);
-			cpm_create_path(drive, mem + DE + 1, path);
-			if((fp = cpm_get_file_ptr(path)) != NULL) {
-				if(fseek(fp, record * 128, SEEK_SET) == 0) {
-					if((size = fread(mem + dma_addr, 1, 128, fp)) != 0) {
-						if (size < 128) {
-							memset(mem + dma_addr + size, 0x1a, 128 - size);
+			record = cpm_get_random_record(DE);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+			if((fd = cpm_get_file_desc(path)) != -1) {
+				if(_lseek(fd, record * 128, SEEK_SET) != -1) {
+					if((size = _read(fd, buffer, 128)) > 0) {
+						if(size < 128) {
+//							memset(buffer + size, 0x00, 128 - size); // MSX-DOS2
+							memset(buffer + size, 0x1a, 128 - size);
 						}
-						mem[DE + 32] = record & 0x7f;
-						mem[DE + 12] = (record >> 7) & 0x1f;
-						mem[DE + 13] = (record >> 12) & 0xff;
-						mem[DE + 14] = (record >> 20) & 0xff;
+						cpm_memcpy(dma_addr, buffer, 128);
+						cpm_set_current_record(DE, record);
 						A = 0;
 						return;
 					}
@@ -749,22 +911,20 @@ void cpm_bdos()
 		}
 		A = 1;
 		break;
-	case 34:
+	case 0x22:
 		// random access write record
-	case 40:
+	case 0x28:
 		// write random with zero fill
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
-				record = mem[DE + 33] | (mem[DE + 34] << 8);
-				cpm_create_path(drive, mem + DE + 1, path);
-				if((fp = cpm_get_file_ptr(path)) != NULL) {
-					if(fseek(fp, record * 128, SEEK_SET) == 0) {
-						if(fwrite(mem + dma_addr, 128, 1, fp) != 0) {
-							mem[DE + 32] = record & 0x7f;
-							mem[DE + 12] = (record >> 7) & 0x1f;
-							mem[DE + 13] = (record >> 12) & 0xff;
-							mem[DE + 14] = (record >> 20) & 0xff;
+				record = cpm_get_random_record(DE);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+				if((fd = cpm_get_file_desc(path)) != -1) {
+					if(_lseek(fd, record * 128, SEEK_SET) != -1) {
+						cpm_memcpy(buffer, dma_addr, 128);
+						if(_write(fd, buffer, 128) == 128) {
+							cpm_set_current_record(DE, record);
 							A = 0;
 							return;
 						}
@@ -774,16 +934,13 @@ void cpm_bdos()
 		}
 		A = 2;
 		break;
-	case 35:
+	case 0x23:
 		// compute file size
-		if((drive = mem[DE] ? (mem[DE] - 1) : default_drive) < MAX_DRIVES) {
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			cpm_create_path(drive, mem + DE + 1, path);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 			if((size = cpm_get_file_size(path)) >= 0) {
-				record = size >> 7;
-				mem[DE + 33] = record & 0xff;
-				mem[DE + 34] = (record >> 8) & 0xff;
-				mem[DE + 35] = (record >> 16) & 0xff;
+				cpm_set_random_record(DE, (size + 127) >> 7);
 				A = 0;
 				return;
 			}
@@ -791,17 +948,12 @@ void cpm_bdos()
 		A = 0xff;
 		H = 0;
 		break;
-	case 36:
+	case 0x24:
 		// update random access pointer
-		record = mem[DE + 32] & 0x7f;
-		record += (mem[DE + 12] & 0x1f) << 7;
-		record += mem[DE + 13] << 12;
-		record += mem[DE + 14] << 20;
-		mem[DE + 33] = record & 0xff;
-		mem[DE + 34] = (record >> 8) & 0xff;
-		mem[DE + 35] = (record >> 16) & 0xff;
+		record = cpm_get_current_record(DE);
+		cpm_set_random_record(DE, record);
 		break;
-	case 37:
+	case 0x25:
 		// selectively reset disc drives
 		for(int i = 0; i < 16; i++) {
 			if(DE & (1 << i)) {
@@ -810,7 +962,144 @@ void cpm_bdos()
 		}
 		A = 0;
 		break;
-	case 110:
+#ifdef _MSX
+	case 0x26:
+		// random access write block
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
+			if(!read_only[drive]) {
+				login_drive |= 1 << drive;
+				record = msx_get_random_record(DE);
+				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+				if((fd = cpm_get_file_desc(path)) != -1) {
+					uint16 rec_size = msx_get_record_size(DE);
+					uint16 offset = dma_addr;
+					uint16 count = 0;
+					if(HL == 0) {
+						if(_chsize(fd, record * rec_size) == 0) {
+							A = 0;
+							return;
+						}
+					} else if(_lseek(fd, record * rec_size, SEEK_SET) != -1) {
+						while(count < HL) {
+							cpm_memcpy(buffer, offset, rec_size);
+							if(_write(fd, buffer, rec_size) == rec_size) {
+								offset += rec_size;
+								count++;
+							} else {
+								break;
+							}
+						}
+						msx_set_random_record(DE, record + count);
+						if(count < HL) {
+							A = 1;
+						} else {
+							A = 0;
+						}
+						return;
+					}
+				}
+			}
+		}
+		A = 0xff;
+		break;
+	case 0x27:
+		// random access read block
+		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
+			login_drive |= 1 << drive;
+			record = msx_get_random_record(DE);
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+			if((fd = cpm_get_file_desc(path)) != -1) {
+				uint16 rec_size = msx_get_record_size(DE);
+				uint16 offset = dma_addr;
+				uint16 count = 0;
+				if(_lseek(fd, record * rec_size, SEEK_SET) != -1) {
+					while(count < HL) {
+						if((size = _read(fd, buffer, rec_size)) > 0) {
+							if(size < rec_size) {
+								memset(buffer + size, 0x1a, rec_size - size);
+							}
+							cpm_memcpy(offset, buffer, rec_size);
+							offset += rec_size;
+							count++;
+						} else {
+							break;
+						}
+					}
+					msx_set_random_record(DE, record + count);
+					if(count < HL) {
+						A = 1;
+					} else {
+						A = 0;
+					}
+					HL = count;
+					return;
+				}
+			}
+		}
+		A = 0xff;
+		break;
+	case 0x2a:
+		GetLocalTime(&sTime);
+		HL = sTime.wYear;
+		D  = (uint8)sTime.wMonth;
+		E  = (uint8)sTime.wDay;
+		A  = (uint8)sTime.wDayOfWeek;
+		break;
+	case 0x2b:
+		if(check_date(HL, D, E)) {
+			GetLocalTime(&sTime);
+			sTime.wYear = HL;
+			sTime.wMonth = D;
+			sTime.wDay = E;
+			SetLocalTime(&sTime);
+			A = 0;
+		} else {
+			A = 0xff;
+		}
+		break;
+	case 0x2c:
+		GetLocalTime(&sTime);
+		H = (uint8)sTime.wHour;
+		L = (uint8)sTime.wMinute;
+		D = (uint8)sTime.wSecond;
+		E = 0; //(uint8)(sTime.wMilliseconds / 10);
+		break;
+	case 0x2d:
+		if(check_time(H, L, D)) {
+			GetLocalTime(&sTime);
+			sTime.wHour = H;
+			sTime.wMinute = L;
+			sTime.wSecond = D;
+			sTime.wMilliseconds = E * 10;
+			SetLocalTime(&sTime);
+			A = 0;
+		} else {
+			A = 0xff;
+		}
+		break;
+	case 0x2e:
+		verify = E ? 0xff : 0;
+		break;
+	case 0x2f:
+	case 0x30:
+		A = 0xff;
+		break;
+	// MSX2-DOS servoces
+	case 0x57:
+		DE = dma_addr;
+		break;
+	case 0x58:
+		B = verify;
+		break;
+	case 0x6f:
+		A = 0;
+		BC = 0x103; // Ver 1.03
+		break;
+	case 0x70:
+		A = B = 0;
+		break;
+#else
+	case 0x6e:
 		// get/set string delimiter
 		if(DE == 0xffff) {
 			A = delimiter;
@@ -818,13 +1107,47 @@ void cpm_bdos()
 			delimiter = E;
 		}
 		break;
+#endif
 	default:
+//		fprintf(stderr, "BDOS %02Xh\n", C);
+//		exit(1);
 		A = 0;
 		break;
 	}
 }
 
-void cpm_create_path(int drive, uint8* src, char* dest)
+void cpm_memset(uint16 addr, int c, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		WM8(addr + i, c);
+	}
+}
+
+void cpm_memcpy(uint16 dst, const void *src, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		WM8(dst + i, ((uint8 *)src)[i]);
+	}
+}
+
+void cpm_memcpy(void *dst, uint16 src, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		((uint8 *)dst)[i] = RM8(src + i);
+	}
+}
+
+const uint8* cpm_get_mem_array(uint16 addr)
+{
+	static uint8 array[11];
+	
+	for(int i = 0; i < 11; i++) {
+		array[i] = RM8(addr + i);
+	}
+	return array;
+}
+
+void cpm_create_path(int drive, const uint8* src, char* dest)
 {
 	char file[9], ext[4];
 	for(int i = 0; i < 8; i++) {
@@ -842,58 +1165,598 @@ void cpm_create_path(int drive, uint8* src, char* dest)
 	}
 }
 
-FILE* cpm_get_file_ptr(char* path)
+int cpm_get_file_desc(const char* path)
 {
 	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_ptr[i] != NULL && stricmp(file_path[i], path) == 0) {
-			return file_ptr[i];
+		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+			return file_info[i].fd;
 		}
 	}
 	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_ptr[i] == NULL) {
-			if((file_ptr[i] = fopen(path, "r+b")) != NULL) {
-				strcpy(file_path[i], path);
-				return file_ptr[i];
+		if(file_info[i].fd == -1) {
+#ifdef _MSX
+			WIN32_FILE_ATTRIBUTE_DATA fad;
+			HANDLE hFile = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+			if(hFile != INVALID_HANDLE_VALUE) {
+				if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
+					FILETIME time;
+					FileTimeToLocalFileTime(&fad.ftLastWriteTime, &time);
+					FileTimeToDosDateTime(&time, &file_info[i].fatDate, &file_info[i].fatTime);
+				}
+				CloseHandle(hFile);
+			}
+#endif
+			if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE)) != -1) {
+				strcpy(file_info[i].path, path);
+				return file_info[i].fd;
 			}
 			break;
 		}
 	}
-	return NULL;
+	return -1;
 }
 
-void cpm_close_file(char* path)
+void cpm_close_file(const char* path)
 {
 	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_ptr[i] != NULL && stricmp(file_path[i], path) == 0) {
-			fclose(file_ptr[i]);
-			file_ptr[i] = NULL;
-			*file_path[i] = '\0';
+		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+			_close(file_info[i].fd);
+			file_info[i].fd = -1;
+			file_info[i].path[0] = '\0';
 			break;
 		}
 	}
 }
 
-int cpm_get_file_size(char* path)
+int cpm_get_file_size(const char* path)
 {
 	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_ptr[i] != NULL && stricmp(file_path[i], path) == 0) {
-			fseek(file_ptr[i], 0, SEEK_END);
-			int size = ftell(file_ptr[i]);
-			fclose(file_ptr[i]);
-			file_ptr[i] = NULL;
-			*file_path[i] = '\0';
+		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+			_lseek(file_info[i].fd, 0, SEEK_END);
+			int size = _tell(file_info[i].fd);
+			_close(file_info[i].fd);
+			file_info[i].fd = -1;
+			file_info[i].path[0] = '\0';
 			return size;
 		}
 	}
-	FILE* fp = fopen(path, "rb");
-	if(fp != NULL) {
-		fseek(fp, 0, SEEK_END);
-		int size = ftell(fp);
-		fclose(fp);
+	int fd = _open(path, _O_RDONLY | _O_BINARY, _S_IREAD);
+	if(fd != -1) {
+		_lseek(fd, 0, SEEK_END);
+		int size = _tell(fd);
+		_close(fd);
 		return size;
 	}
 	return -1;
 }
+
+int cpm_get_drive(uint16 fcb)
+{
+	return RM8(fcb) ? (RM8(fcb) - 1) : default_drive;
+}
+
+int cpm_get_current_extent(uint16 fcb)
+{
+	return (RM8(fcb + 12) & 0x1f) | (RM8(fcb + 13) << 5);
+}
+
+void cpm_set_alloc_vector(uint16 fcb, int block)
+{
+	for(int i = 0; i < 16; i++) {
+		WM8(fcb + i + 16, (block > i * 1024) ? i + 1 : 0);
+	}
+}
+
+uint32 cpm_get_current_record(uint16 fcb)
+{
+	uint32 record = RM8(fcb + 32) & 0x7f;
+	record += (RM8(fcb + 12) & 0x1f) << 7;
+	record += RM8(fcb + 13) << 12;
+	record += RM8(fcb + 14) << 20;
+	return record;
+}
+
+void cpm_set_current_record(uint16 fcb, uint32 record)
+{
+	WM8(fcb + 32, record & 0x7f);
+	WM8(fcb + 12, (record >> 7) & 0x1f);
+	WM8(fcb + 13, (record >> 12) & 0xff);
+	WM8(fcb + 14, (record >> 20) & 0xff);
+}
+
+uint32 cpm_get_random_record(uint16 fcb)
+{
+	return RM24(fcb + 33);
+}
+
+void cpm_set_random_record(uint16 fcb, uint32 record)
+{
+	WM24(fcb + 33, record);
+}
+
+void cpm_set_record_count(uint16 fcb, uint8 count)
+{
+	WM8(fcb + 15, count);
+}
+
+#ifdef _MSX
+void msx_sub(uint16 addr)
+{
+	switch(addr) {
+	case 0x0089: // GRPPRT
+		cons_putch(A);
+		break;
+	case 0x00d1: // CHGMOD
+		if(A == 0 || A == 1) {
+			WM8(0xf3b0, RM8(A == 0 ? 0xf3ae : 0xf3af));
+		}
+		system("cls");
+		break;
+	case 0x00d5: // INITXT
+		WM8(0xf3b0, RM8(0xf3ae));
+		system("cls");
+		break;
+	case 0x00d9: // INIT32
+		WM8(0xf3b0, RM8(0xf3af));
+		system("cls");
+		break;
+	case 0x0115: // CLSSUB
+		system("cls");
+		break;
+	case 0x017d: // BEEP
+		MessageBeep(-1);
+		break;
+	case 0x1ad: // NEWPAD
+		A = 0;
+		break;
+	case 0x1bd: // KNJPRT
+		{
+			uint16 code = jis_to_sjis(BC);
+			cons_putch((code >> 8) & 0xff);
+			cons_putch((code >> 0) & 0xff);
+		}
+		break;
+	case 0x01f5: // RECLK
+		{
+			OUT8(0xb4, 0x0d);
+			uint8 mode = IN8(0xb5);
+			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
+			OUT8(0xb4, C & 0x0f);
+			A = IN8(0xb5);
+			OUT8(0xb4, 0x0d);
+			OUT8(0xb5, mode);
+		}
+		break;
+	case 0x01f9: // WRTLK
+		{
+			OUT8(0xb4, 0x0d);
+			uint8 mode = IN8(0xb5);
+			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
+			OUT8(0xb4, C & 0x0f);
+			OUT8(0xb5, A);
+			OUT8(0xb4, 0x0d);
+			OUT8(0xb5, mode);
+		}
+		break;
+	case 0x4010: // DSKIO
+	case 0x4013: // DSKCHG
+	case 0x401c: // DSKFMT
+		A = 2; // Not Ready
+		F |= CF;
+		break;
+	case 0x4019: // CHOICE
+		HL = 0;
+		break;
+//	default:
+//		fprintf(stderr, "SUB %04Xh\n", addr);
+//		exit(1);
+	}
+}
+
+void msx_main(uint16 addr)
+{
+	char string[512];
+	int len;
+	uint8 slt;
+	uint16 adr;
+	pair tmp;
+	
+	switch(addr) {
+	case 0x000c: // RDSLT
+		A = rd_bank[A & 3][(HL >> 14) & 3][HL & 0x3fff];
+		break;
+	case 0x0014: // WRSLT
+		wr_bank[A & 3][(HL >> 14) & 3][HL & 0x3fff] = E;
+		break;
+	case 0x001c: // CALSLT
+		slt = (IY >> 8) & 3;
+		if(slt == 0) {
+			msx_main(IX);
+		} else if(slt == 1) {
+			msx_sub(IX);
+		}
+		break;
+	case 0x0020: // DCOMPR
+		if(HL == DE) {
+			F |= ZF;
+		} else {
+			F &= ~ZF;
+		}
+		if(HL < DE) {
+			F |= CF;
+		} else {
+			F &= ~CF;
+		}
+		break;
+	case 0x0024: // ENASLT
+		slot[(HL >> 14) & 3] = A & 3;
+		iff1 = iff2 = 0; // DI
+		break;
+	case 0x0030: // CALLF
+		RM16p(SPD, &pc);
+		SP += 2;
+		slt = FETCH8();
+		adr = FETCH16();
+		if(slt == 0) {
+			msx_main(adr);
+		} else if(slt == 1) {
+			msx_sub(adr);
+		}
+		SP -= 2;
+		WM16p(SPD, &pc);
+		break;
+	case 0x005f: // CHGMOD
+		if(A == 0) {
+			WM8(0xf3b0, RM8(0xf3ae));
+		} else if(A == 1) {
+			WM8(0xf3b0, RM8(0xf3af));
+		}
+		system("cls");
+		break;
+	case 0x006c: // INITXT
+		WM8(0xf3b0, RM8(0xf3ae));
+		system("cls");
+		break;
+	case 0x006f: // INIT32
+		WM8(0xf3b0, RM8(0xf3af));
+		system("cls");
+		break;
+	case 0x008d: // GRPPRT
+		cons_putch(A);
+		break;
+	case 0x009c: // CHSNS
+		if(cons_kbhit()) {
+			F &= ~ZF;
+		} else {
+			F |= ZF;
+		}
+		Sleep(0);
+		break;
+	case 0x009f: // CHGET
+		A = cons_getch();
+		break;
+	case 0x00a2: // CHPUT
+		cons_putch(A);
+		break;
+	case 0x00ae: // PINLIN
+PINLIN:
+		if(gets(string) != NULL) {
+			len = strlen(string);
+			if(len > 0 && string[len - 1] == 0x0d) len--;
+			if(len > 257) len = 257;
+		} else {
+			len = 0;
+		}
+		HL = 0xf55e;
+		cpm_memcpy(HL, string, len);
+		WM8(HL + len, 0);
+		F &= ~CF;
+		break;
+	case 0x00b1: // INLIN
+		WM8(0xf6aa, 1);
+		goto PINLIN;
+	case 0x00b4: // QINLIN
+		cons_putch('?');
+		cons_putch(' ');
+		goto PINLIN;
+	case 0x00c0: // BEEP
+		MessageBeep(-1);
+		break;
+	case 0x00c3: // CLS
+		system("cls");
+		break;
+	case 0x00c6: // POSIT
+		cons_cursor(H, L);
+		break;
+	case 0x00d2: // TOTEXT
+		system("cls");
+		break;
+	case 0x00d8: // GTTRIG
+		if(A == 0) {
+			A = (GetAsyncKeyState(VK_SPACE) & 0x8000) ? 0xff : 0;
+		} else {
+			A = 0;
+		}
+		break;
+	case 0x00db: // GTPAD
+	case 0x00de: // GTPDL
+		A = 0;
+		break;
+	case 0x00e1: // TAPION
+	case 0x00e4: // TAPIN
+	case 0x00e7: // TAPPOF
+	case 0x00ea: // TAPOON
+	case 0x00ed: // TAPOUT
+	case 0x00f0: // TAPOOF
+		F |= CF;
+		break;
+	case 0x0156: // KILBUF
+		while(cons_kbhit()) {
+			cons_getch();
+		}
+		break;
+	case 0x15c: // SUBROM
+		SP -= 2;
+		WM16(SP, IX);
+	case 0x15f: // EXTROM
+		msx_sub(IX);
+		break;
+	case 0xf380: // RDPRIM
+		OUT8(0xa8, A);
+		E = RM8(HL);
+		A = D;
+		OUT8(0xa8, A);
+		break;
+	case 0xf385: // WRPRIM
+		OUT8(0xa8, A);
+		WM8(HL, E);
+		A = D;
+		OUT8(0xa8, A);
+		break;
+	case 0xf38c: // CLPRIM
+		OUT8(0xa8, A);
+		tmp = af; af = af2; af2 = tmp;
+		slt = slot[(IX >> 14) & 3];
+		if(slt == 0) {
+			msx_main(IX);
+		} else if(slt == 1) {
+			msx_sub(IX);
+		}
+		tmp = af; af = af2; af2 = tmp;
+		RM16p(SPD, &af);
+		SP += 2;
+		OUT8(0xa8, A);
+		tmp = af; af = af2; af2 = tmp;
+		break;
+	case 0xffca: // FCALL
+		if(D == 0x00) {
+			if(E == 0x00) {
+				slt = slot[HL >> 14];
+				slot[HL >> 14] = B & 3;
+				WM8(HL++, 0x11);
+				slot[HL >> 14] = slt;
+			}
+		} else if(D == 0x11) {
+			if(E == 0x00) {
+				A = kanji_mode;
+			} else if(E == 0x01) {
+				kanji_mode = A;
+			}
+		}
+		break;
+//	default:
+//		fprintf(stderr, "MAIN %04Xh\n", addr);
+//		exit(1);
+	}
+}
+
+void msx_set_file_size(uint16 fcb, int size)
+{
+	WM32(fcb + 16, size);
+}
+
+void msx_set_file_time(uint16 fcb, const char *path)
+{
+}
+
+uint16 msx_get_record_size(uint16 fcb)
+{
+	return RM16(fcb + 14);
+}
+
+uint32 msx_get_random_record(uint16 fcb)
+{
+	if(msx_get_record_size(fcb) < 64) {
+		return RM32(fcb + 33);
+	} else {
+		return RM24(fcb + 33);
+	}
+}
+
+void msx_set_random_record(uint16 fcb, uint32 record)
+{
+	if(msx_get_record_size(fcb) < 64) {
+		WM32(fcb + 33, record);
+	} else {
+		WM24(fcb + 33, record);
+	}
+}
+
+bool check_leap_year(int year)
+{
+	if((year % 400) == 0) {
+		return true;
+	} else if((year % 100) == 0) {
+		return false;
+	} else if((year % 4) == 0) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+bool check_date(int year, int month, int day)
+{
+	if(!(year >= 1980 && year <= 2079)) {
+		return false;
+	} else if(month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12) {
+		return (day >= 1 && day <= 31);
+	} else if(month == 4 || month == 6 || month == 9 || month == 11) {
+		return (day >= 1 && day <= 30);
+	} else if(month == 2) {
+		if(check_leap_year(year)) {
+			return (day >= 1 && day <= 29);
+		} else {
+			return (day >= 1 && day <= 28);
+		}
+	}
+	return false;
+}
+
+bool check_time(int hour, int minute, int second)
+{
+	return ((hour >= 0 && hour <= 23) && (minute >= 0 && minute <= 59) && (second >= 0 && second <= 59));
+}
+
+uint16 jis_to_sjis(uint16 code)
+{
+	int hi = (code >> 8) & 0xff;
+	int lo = (code >> 8) & 0xff;
+	
+	if(hi & 1) {
+		if(lo < 0x60) {
+			lo += 0x1f;
+		} else {
+			lo += 0x20;
+		}
+	} else {
+		lo += 0x7e;
+	}
+	if(hi < 0x5f) {
+		hi = (hi + 0xe1) >> 1;
+	} else {
+		hi = (hi + 0x161) >> 1;
+	}
+	return (hi << 8) | lo;
+}
+
+void set_mapper(int page, int seg)
+{
+	rd_bank[3][page] = mem + 0x4000 * seg;
+	wr_bank[3][page] = mem + 0x4000 * seg;
+	mapper[page] = seg;
+
+}
+
+uint8 get_mapper(int page)
+{
+	return mapper[page];
+}
+
+void reset_rtc()
+{
+	memset(rtc_regs, 0, sizeof(rtc_regs));
+	memset(rtc_ram, 0, sizeof(rtc_ram));
+	
+	rtc_regs[0x0a] = 1;
+	rtc_regs[0x0d] = 8;
+	rtc_regs[0x0f] = 0x0c;
+	
+	rtc_addr = 0;
+	rtc_prev_time = 0;
+}
+
+void set_rtc_addr(uint8 val)
+{
+	rtc_addr = val & 0x0f;
+}
+
+uint8 get_rtc_addr()
+{
+	return rtc_addr;
+}
+
+void set_rtc_data(uint8 val)
+{
+	if(rtc_addr <= 0x0c) {
+		switch(rtc_regs[0x0d] & 3) {
+		case 0:
+			rtc_time[rtc_addr] = val;
+			return;
+		case 2:
+			rtc_ram[rtc_addr] = val;
+			return;
+		case 3:
+			rtc_ram[rtc_addr + 13] = val;
+			return;
+		}
+	}
+	if(rtc_addr == 0x0a) {
+		if((rtc_regs[0x0a] ^ val) & 1) {
+			rtc_prev_time = 0; // force update
+		}
+	}
+	rtc_regs[rtc_addr] = val;
+}
+
+uint8 get_rtc_data()
+{
+	DWORD time;
+	
+	if(rtc_addr <= 0x0c) {
+		switch(rtc_regs[0x0d] & 3) {
+		case 0:
+			if((time = timeGetTime()) != rtc_prev_time) {
+				update_rtc_time();
+				rtc_prev_time = time;
+			}
+			return rtc_time[rtc_addr];
+		case 2:
+			return rtc_ram[rtc_addr];
+		case 3:
+			return rtc_ram[rtc_addr + 13];
+		}
+	}
+	if(rtc_addr == 0x0b) {
+		for(int i = 0; i < 3; i++) {
+			if(check_leap_year(rtc_year - i)) {
+				return i;
+			}
+		}
+		return 3;
+	}
+	return rtc_regs[rtc_addr];
+}
+
+#define RTC_MODE_12H	!(rtc_regs[0x0a] & 1)
+#define TO_BCD_LO(v)	((v) % 10)
+#define TO_BCD_HI(v)	(int)(((v) % 100) / 10)
+
+void update_rtc_time()
+{
+	SYSTEMTIME sTime;
+	
+	GetLocalTime(&sTime);
+	
+	int hour = RTC_MODE_12H ? (sTime.wHour % 12) : sTime.wHour;
+	int ampm = (RTC_MODE_12H && sTime.wHour >= 12) ? 2 : 0;
+	
+	rtc_time[ 0] = TO_BCD_LO(sTime.wSecond);
+	rtc_time[ 1] = TO_BCD_HI(sTime.wSecond);
+	rtc_time[ 2] = TO_BCD_LO(sTime.wMinute);
+	rtc_time[ 3] = TO_BCD_HI(sTime.wMinute);
+	rtc_time[ 4] = TO_BCD_LO(hour);
+	rtc_time[ 5] = TO_BCD_HI(hour) | ampm;
+	rtc_time[ 6] = (uint8)sTime.wDayOfWeek;
+	rtc_time[ 7] = TO_BCD_LO(sTime.wDay);
+	rtc_time[ 8] = TO_BCD_HI(sTime.wDay);
+	rtc_time[ 9] = TO_BCD_LO(sTime.wMonth);
+	rtc_time[10] = TO_BCD_HI(sTime.wMonth);
+	rtc_time[11] = TO_BCD_LO(sTime.wYear);
+	rtc_time[12] = TO_BCD_HI(sTime.wYear);
+	rtc_year = sTime.wYear;
+}
+#endif
 
 /* ----------------------------------------------------------------------------
 	Console
@@ -1013,6 +1876,17 @@ void cons_putch(UINT8 data)
 		_write(_fileno(stdout), &data, 1);
 		return;
 	}
+	
+#ifdef _MSX
+	// hiragana to katakana
+	if(kanji_mode == 0) {
+		if(data >= 0x86 && data <= 0x9f) {
+			data += 0x20;
+		} else if(data >= 0xe0 && data <= 0xfd) {
+			data -= 0x20;
+		}
+	}
+#endif
 	
 	// output to console
 	tmp[p++] = data;
@@ -1356,6 +2230,21 @@ void cons_putch(UINT8 data)
 	}
 }
 
+void cons_cursor(int x, int y)
+{
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	COORD co;
+	
+	GetConsoleScreenBufferInfo(hStdout, &csbi);
+	
+	co.X = min(x, csbi.dwSize.X - 1);
+	co.Y = min(y, csbi.dwSize.Y - 1);
+	
+	if(co.X != csbi.dwCursorPosition.X || co.Y != csbi.dwCursorPosition.Y) {
+		SetConsoleCursorPosition(hStdout, co);
+	}
+}
+
 /* ----------------------------------------------------------------------------
 	Z80 (MAME 0.145)
 ---------------------------------------------------------------------------- */
@@ -1374,21 +2263,87 @@ void cons_putch(UINT8 data)
 
 inline uint8 RM8(uint32 addr)
 {
+#ifdef _MSX
+	int page = (addr >> 14) & 3;
+	return rd_bank[slot[page]][page][addr & 0x3fff];
+#else
 	return mem[addr & 0xffff];
+#endif
 }
 
 inline void WM8(uint32 addr, uint8 val)
 {
+#ifdef _MSX
+	int page = (addr >> 14) & 3;
+	wr_bank[slot[page]][page][addr & 0x3fff] = val;
+#else
 	mem[addr & 0xffff] = val;
+#endif
 }
 
-inline void RM16(uint32 addr, pair *r)
+inline uint32 RM16(uint32 addr)
+{
+	pair tmp;
+	tmp.d = 0;
+	tmp.b.l = RM8(addr);
+	tmp.b.h = RM8((addr + 1) & 0xffff);
+	return tmp.d;
+}
+
+inline void WM16(uint32 addr, uint32 val)
+{
+	pair tmp;
+	tmp.d = val;
+	WM8(addr, tmp.b.l);
+	WM8((addr + 1) & 0xffff, tmp.b.h);
+}
+
+inline uint32 RM24(uint32 addr)
+{
+	pair tmp;
+	tmp.d = 0;
+	tmp.b.l = RM8(addr);
+	tmp.b.h = RM8((addr + 1) & 0xffff);
+	tmp.b.h2 = RM8((addr + 2) & 0xffff);
+	return tmp.d;
+}
+
+inline void WM24(uint32 addr, uint32 val)
+{
+	pair tmp;
+	tmp.d = val;
+	WM8(addr, tmp.b.l);
+	WM8((addr + 1) & 0xffff, tmp.b.h);
+	WM8((addr + 2) & 0xffff, tmp.b.h2);
+}
+
+inline uint32 RM32(uint32 addr)
+{
+	pair tmp;
+	tmp.b.l = RM8(addr);
+	tmp.b.h = RM8((addr + 1) & 0xffff);
+	tmp.b.h2 = RM8((addr + 2) & 0xffff);
+	tmp.b.h3 = RM8((addr + 3) & 0xffff);
+	return tmp.d;
+}
+
+inline void WM32(uint32 addr, uint32 val)
+{
+	pair tmp;
+	tmp.d = val;
+	WM8(addr, tmp.b.l);
+	WM8((addr + 1) & 0xffff, tmp.b.h);
+	WM8((addr + 2) & 0xffff, tmp.b.h2);
+	WM8((addr + 3) & 0xffff, tmp.b.h3);
+}
+
+inline void RM16p(uint32 addr, pair *r)
 {
 	r->b.l = RM8(addr);
 	r->b.h = RM8((addr + 1) & 0xffff);
 }
 
-inline void WM16(uint32 addr, pair *r)
+inline void WM16p(uint32 addr, pair *r)
 {
 	WM8(addr, r->b.l);
 	WM8((addr + 1) & 0xffff, r->b.h);
@@ -1418,11 +2373,87 @@ inline uint32 FETCH16()
 
 inline uint8 IN8(uint32 addr)
 {
-	return 0xff;
+	uint8 val = 0xff;
+	
+#ifdef _MSX
+	switch(addr & 0xff) {
+	case 0xa8:
+		val  = (slot[0] & 3) << 0;
+		val |= (slot[1] & 3) << 2;
+		val |= (slot[2] & 3) << 4;
+		val |= (slot[3] & 3) << 6;
+		break;
+	case 0xb4:
+		val = get_rtc_addr();
+		break;
+	case 0xb5:
+		val = get_rtc_data();
+		break;
+	case 0xd9:
+		if(kanji1_hi == 0x01 && kanji1_lo == 0x20 && kanji1_idx < 8) {
+			static const uint8 kanji1[] = {0x00, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01};
+			val = kanji1[kanji1_idx];
+		}
+		kanji1_idx = (kanji1_idx + 1) & 0x1f;
+		break;
+	case 0xdb:
+		if(kanji2_hi == 0x53 && kanji2_lo == 0x5e && kanji2_idx < 8) {
+			static const uint8 kanji2[] = {0x01, 0x02, 0x0c, 0x37, 0xc0, 0x3b, 0x2a, 0x2a};
+			val = kanji2[kanji1_idx];
+		}
+		kanji2_idx = (kanji2_idx + 1) & 0x1f;
+		break;
+	case 0xfc:
+	case 0xfd:
+	case 0xfe:
+	case 0xff:
+		val = get_mapper(addr & 3);
+		break;
+	}
+#endif
+	return val;
 }
 
 inline void OUT8(uint32 addr, uint8 val)
 {
+#ifdef _MSX
+	switch(addr & 0xff) {
+	case 0xa8:
+		slot[0] = (val >> 0) & 3;
+		slot[1] = (val >> 2) & 3;
+		slot[2] = (val >> 4) & 3;
+		slot[3] = (val >> 6) & 3;
+		break;
+	case 0xb4:
+		set_rtc_addr(val);
+		break;
+	case 0xb5:
+		set_rtc_data(val);
+		break;
+	case 0xd8:
+		kanji1_lo = val;
+		kanji1_idx = 0;
+		break;
+	case 0xd9:
+		kanji1_hi = val;
+		kanji1_idx = 0;
+		break;
+	case 0xda:
+		kanji2_lo = val;
+		kanji2_idx = 0;
+		break;
+	case 0xdb:
+		kanji2_hi = val;
+		kanji2_idx = 0;
+		break;
+	case 0xfc:
+	case 0xfd:
+	case 0xfe:
+	case 0xff:
+		set_mapper(addr & 3, val);
+		break;
+	}
+#endif
 }
 
 #define EAX() do { \
@@ -1436,13 +2467,13 @@ inline void OUT8(uint32 addr, uint8 val)
 } while(0)
 
 #define POP(DR) do { \
-	RM16(SPD, &DR); \
+	RM16p(SPD, &DR); \
 	SP += 2; \
 } while(0)
 
 #define PUSH(SR) do { \
 	SP -= 2; \
-	WM16(SPD, &SR); \
+	WM16p(SPD, &SR); \
 } while(0)
 
 #define JP() do { \
@@ -1683,8 +2714,8 @@ inline uint8 DEC(uint8 value)
 #define EXSP(DR) do { \
 	pair tmp; \
 	tmp.d = 0; \
-	RM16(SPD, &tmp); \
-	WM16(SPD, &DR); \
+	RM16p(SPD, &tmp); \
+	WM16p(SPD, &DR); \
 	DR = tmp; \
 	WZ = DR.d; \
 } while(0)
@@ -2504,13 +3535,13 @@ void OP_DD(uint8 code)
 	case 0x09: ADD16(ix, bc); break;				/* ADD  IX,BC       */
 	case 0x19: ADD16(ix, de); break;				/* ADD  IX,DE       */
 	case 0x21: IX = FETCH16(); break;				/* LD   IX,w        */
-	case 0x22: ea = FETCH16(); WM16(ea, &ix); WZ = ea + 1; break;	/* LD   (w),IX      */
+	case 0x22: ea = FETCH16(); WM16p(ea, &ix); WZ = ea + 1; break;	/* LD   (w),IX      */
 	case 0x23: IX++; break;						/* INC  IX          */
 	case 0x24: HX = INC(HX); break;					/* INC  HX          */
 	case 0x25: HX = DEC(HX); break;					/* DEC  HX          */
 	case 0x26: HX = FETCH8(); break;				/* LD   HX,n        */
 	case 0x29: ADD16(ix, ix); break;				/* ADD  IX,IX       */
-	case 0x2a: ea = FETCH16(); RM16(ea, &ix); WZ = ea + 1; break;	/* LD   IX,(w)      */
+	case 0x2a: ea = FETCH16(); RM16p(ea, &ix); WZ = ea + 1; break;	/* LD   IX,(w)      */
 	case 0x2b: IX--; break;						/* DEC  IX          */
 	case 0x2c: LX = INC(LX); break;					/* INC  LX          */
 	case 0x2d: LX = DEC(LX); break;					/* DEC  LX          */
@@ -2598,13 +3629,13 @@ void OP_FD(uint8 code)
 	case 0x09: ADD16(iy, bc); break;				/* ADD  IY,BC       */
 	case 0x19: ADD16(iy, de); break;				/* ADD  IY,DE       */
 	case 0x21: IY = FETCH16(); break;				/* LD   IY,w        */
-	case 0x22: ea = FETCH16(); WM16(ea, &iy); WZ = ea + 1; break;	/* LD   (w),IY      */
+	case 0x22: ea = FETCH16(); WM16p(ea, &iy); WZ = ea + 1; break;	/* LD   (w),IY      */
 	case 0x23: IY++; break;						/* INC  IY          */
 	case 0x24: HY = INC(HY); break;					/* INC  HY          */
 	case 0x25: HY = DEC(HY); break;					/* DEC  HY          */
 	case 0x26: HY = FETCH8(); break;				/* LD   HY,n        */
 	case 0x29: ADD16(iy, iy); break;				/* ADD  IY,IY       */
-	case 0x2a: ea = FETCH16(); RM16(ea, &iy); WZ = ea + 1; break;	/* LD   IY,(w)      */
+	case 0x2a: ea = FETCH16(); RM16p(ea, &iy); WZ = ea + 1; break;	/* LD   IY,(w)      */
 	case 0x2b: IY--; break;						/* DEC  IY          */
 	case 0x2c: LY = INC(LY); break;					/* INC  LY          */
 	case 0x2d: LY = DEC(LY); break;					/* DEC  LY          */
@@ -2692,7 +3723,7 @@ void OP_ED(uint8 code)
 	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; break;			/* IN   B,(C)       */
 	case 0x41: OUT8(BC, B); break;						/* OUT  (C),B       */
 	case 0x42: SBC16(bc); break;						/* SBC  HL,BC       */
-	case 0x43: ea = FETCH16(); WM16(ea, &bc); WZ = ea + 1; break;		/* LD   (w),BC      */
+	case 0x43: ea = FETCH16(); WM16p(ea, &bc); WZ = ea + 1; break;		/* LD   (w),BC      */
 	case 0x44: NEG(); break;						/* NEG              */
 	case 0x45: RETN(); break;						/* RETN             */
 	case 0x46: im = 0; break;						/* im   0           */
@@ -2700,7 +3731,7 @@ void OP_ED(uint8 code)
 	case 0x48: C = IN8(BC); F = (F & CF) | SZP[C]; break;			/* IN   C,(C)       */
 	case 0x49: OUT8(BC, C); break;						/* OUT  (C),C       */
 	case 0x4a: ADC16(bc); break;						/* ADC  HL,BC       */
-	case 0x4b: ea = FETCH16(); RM16(ea, &bc); WZ = ea + 1; break;		/* LD   BC,(w)      */
+	case 0x4b: ea = FETCH16(); RM16p(ea, &bc); WZ = ea + 1; break;		/* LD   BC,(w)      */
 	case 0x4c: NEG(); break;						/* NEG              */
 	case 0x4d: RETI(); break;						/* RETI             */
 	case 0x4e: im = 0; break;						/* im   0           */
@@ -2708,7 +3739,7 @@ void OP_ED(uint8 code)
 	case 0x50: D = IN8(BC); F = (F & CF) | SZP[D]; break;			/* IN   D,(C)       */
 	case 0x51: OUT8(BC, D); break;						/* OUT  (C),D       */
 	case 0x52: SBC16(de); break;						/* SBC  HL,DE       */
-	case 0x53: ea = FETCH16(); WM16(ea, &de); WZ = ea + 1; break;		/* LD   (w),DE      */
+	case 0x53: ea = FETCH16(); WM16p(ea, &de); WZ = ea + 1; break;		/* LD   (w),DE      */
 	case 0x54: NEG(); break;						/* NEG              */
 	case 0x55: RETN(); break;						/* RETN             */
 	case 0x56: im = 1; break;						/* im   1           */
@@ -2716,7 +3747,7 @@ void OP_ED(uint8 code)
 	case 0x58: E = IN8(BC); F = (F & CF) | SZP[E]; break;			/* IN   E,(C)       */
 	case 0x59: OUT8(BC, E); break;						/* OUT  (C),E       */
 	case 0x5a: ADC16(de); break;						/* ADC  HL,DE       */
-	case 0x5b: ea = FETCH16(); RM16(ea, &de); WZ = ea + 1; break;		/* LD   DE,(w)      */
+	case 0x5b: ea = FETCH16(); RM16p(ea, &de); WZ = ea + 1; break;		/* LD   DE,(w)      */
 	case 0x5c: NEG(); break;						/* NEG              */
 	case 0x5d: RETI(); break;						/* RETI             */
 	case 0x5e: im = 2; break;						/* im   2           */
@@ -2724,7 +3755,7 @@ void OP_ED(uint8 code)
 	case 0x60: H = IN8(BC); F = (F & CF) | SZP[H]; break;			/* IN   H,(C)       */
 	case 0x61: OUT8(BC, H); break;						/* OUT  (C),H       */
 	case 0x62: SBC16(hl); break;						/* SBC  HL,HL       */
-	case 0x63: ea = FETCH16(); WM16(ea, &hl); WZ = ea + 1; break;		/* LD   (w),HL      */
+	case 0x63: ea = FETCH16(); WM16p(ea, &hl); WZ = ea + 1; break;		/* LD   (w),HL      */
 	case 0x64: NEG(); break;						/* NEG              */
 	case 0x65: RETN(); break;						/* RETN             */
 	case 0x66: im = 0; break;						/* im   0           */
@@ -2732,7 +3763,7 @@ void OP_ED(uint8 code)
 	case 0x68: L = IN8(BC); F = (F & CF) | SZP[L]; break;			/* IN   L,(C)       */
 	case 0x69: OUT8(BC, L); break;						/* OUT  (C),L       */
 	case 0x6a: ADC16(hl); break;						/* ADC  HL,HL       */
-	case 0x6b: ea = FETCH16(); RM16(ea, &hl); WZ = ea + 1; break;		/* LD   HL,(w)      */
+	case 0x6b: ea = FETCH16(); RM16p(ea, &hl); WZ = ea + 1; break;		/* LD   HL,(w)      */
 	case 0x6c: NEG(); break;						/* NEG              */
 	case 0x6d: RETI(); break;						/* RETI             */
 	case 0x6e: im = 0; break;						/* im   0           */
@@ -2740,14 +3771,14 @@ void OP_ED(uint8 code)
 	case 0x70: {uint8 res = IN8(BC); F = (F & CF) | SZP[res];} break;	/* IN   F,(C)       */
 	case 0x71: OUT8(BC, 0); break;						/* OUT  (C),0       */
 	case 0x72: SBC16(sp); break;						/* SBC  HL,SP       */
-	case 0x73: ea = FETCH16(); WM16(ea, &sp); WZ = ea + 1; break;		/* LD   (w),SP      */
+	case 0x73: ea = FETCH16(); WM16p(ea, &sp); WZ = ea + 1; break;		/* LD   (w),SP      */
 	case 0x74: NEG(); break;						/* NEG              */
 	case 0x75: RETN(); break;						/* RETN             */
 	case 0x76: im = 1; break;						/* im   1           */
 	case 0x78: A = IN8(BC); F = (F & CF) | SZP[A]; WZ = BC + 1; break;	/* IN   A,(C)       */
 	case 0x79: OUT8(BC, A); WZ = BC + 1; break;				/* OUT  (C),A       */
 	case 0x7a: ADC16(sp); break;						/* ADC  HL,SP       */
-	case 0x7b: ea = FETCH16(); RM16(ea, &sp); WZ = ea + 1; break;		/* LD   SP,(w)      */
+	case 0x7b: ea = FETCH16(); RM16p(ea, &sp); WZ = ea + 1; break;		/* LD   SP,(w)      */
 	case 0x7c: NEG(); break;						/* NEG              */
 	case 0x7d: RETI(); break;						/* RETI             */
 	case 0x7e: im = 2; break;						/* im   2           */
@@ -2810,7 +3841,7 @@ void OP(uint8 code)
 	case 0x1f: RRA(); break;											/* RRA              */
 	case 0x20: JR_COND(!(F & ZF), 0x20); break;									/* JR   NZ,o        */
 	case 0x21: HL = FETCH16(); break;										/* LD   HL,w        */
-	case 0x22: ea = FETCH16(); WM16(ea, &hl); WZ = ea + 1; break;							/* LD   (w),HL      */
+	case 0x22: ea = FETCH16(); WM16p(ea, &hl); WZ = ea + 1; break;							/* LD   (w),HL      */
 	case 0x23: HL++; break;												/* INC  HL          */
 	case 0x24: H = INC(H); break;											/* INC  H           */
 	case 0x25: H = DEC(H); break;											/* DEC  H           */
@@ -2818,7 +3849,7 @@ void OP(uint8 code)
 	case 0x27: DAA(); break;											/* DAA              */
 	case 0x28: JR_COND(F & ZF, 0x28); break;									/* JR   Z,o         */
 	case 0x29: ADD16(hl, hl); break;										/* ADD  HL,HL       */
-	case 0x2a: ea = FETCH16(); RM16(ea, &hl); WZ = ea + 1; break;							/* LD   HL,(w)      */
+	case 0x2a: ea = FETCH16(); RM16p(ea, &hl); WZ = ea + 1; break;							/* LD   HL,(w)      */
 	case 0x2b: HL--; break;												/* DEC  HL          */
 	case 0x2c: L = INC(L); break;											/* INC  L           */
 	case 0x2d: L = DEC(L); break;											/* DEC  L           */
@@ -2978,11 +4009,33 @@ void OP(uint8 code)
 	case 0xc7: RST(0x00); break;											/* RST  0           */
 	case 0xc8: RET_COND(F & ZF, 0xc8); break;									/* RET  Z           */
 	case 0xc9: 
-		if(prevpc == BDOS_BASE_2) {
-			cpm_bdos();
-		} else if(prevpc >= BIOS_BASE_2) {
-			cpm_bios(prevpc - BIOS_BASE_2);
+#ifdef _MSX
+		switch(slot[(prevpc >> 14) & 3]) {
+		case 0:
+			msx_main(prevpc);
+			break;
+		case 1:
+			msx_sub(prevpc);
+			break;
+		case 3:
+			if(prevpc == 0x000c ||
+			   prevpc == 0x0014 ||
+			   prevpc == 0x001c ||
+			   prevpc == 0x0024 ||
+			   prevpc == 0x0030 ||
+			   prevpc >= CPM_BIOS_END) {
+				msx_main(prevpc);
+			} else
+#endif
+			if(prevpc == BDOS_BASE_2) {
+				cpm_bdos();
+			} else if(prevpc >= BIOS_BASE_2) {
+				cpm_bios(prevpc - BIOS_BASE_2);
+			}
+#ifdef _MSX
+			break;
 		}
+#endif
 		POP(pc); WZ = PCD; break;										/* RET              */
 	case 0xca: JP_COND(F & ZF); break;										/* JP   Z,a         */
 	case 0xcb: OP_CB(FETCHOP()); break;										/* **** CB xx       */
