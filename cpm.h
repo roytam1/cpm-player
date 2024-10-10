@@ -90,6 +90,7 @@ typedef union {
 
 #define MAX_DRIVES	1
 #define MAX_FILES	16
+#define MAX_FIND_FILES	1024
 #define TPA_BASE	0x100
 #ifdef _MSX
 #define CPM_BIOS_END	0xf1c9
@@ -109,15 +110,13 @@ uint8 delimiter;
 uint8 verify;
 uint8 read_only[16];
 uint16 dma_addr;
-uint8 find_files[256][33];
+uint8 find_files[MAX_FIND_FILES][33];
 int find_num, find_idx;
 struct {
 	int fd;
 	char path[MAX_PATH];
-#ifdef _MSX
-	WORD fatDate, fatTime;
-#endif
 } file_info[MAX_FILES];
+uint8 file_written[0x10000] = {0};
 
 void cpm_bios(int num);
 void cpm_bdos();
@@ -143,6 +142,9 @@ void cpm_set_record_count(uint16 fcb, uint8 count);
 
 #ifdef _MSX
 void msx_set_file_size(uint16 fcb, int size);
+int msx_get_file_size(uint16 fcb);
+void msx_set_file_time(uint16 fcb, const char *path);
+void msx_set_cur_time(uint16 fcb);
 uint16 msx_get_record_size(uint16 fcb);
 uint32 msx_get_random_record(uint16 fcb);
 void msx_set_random_record(uint16 fcb, uint32 record);

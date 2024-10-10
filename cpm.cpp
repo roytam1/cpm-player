@@ -572,16 +572,9 @@ void cpm_bdos()
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 			if((size = cpm_get_file_size(path)) >= 0) {
 #ifdef _MSX
-				WM32(DE + 16, size);
-				WM32(DE + 20, 0);
-				WM32(DE + 22, 0);
-				for(int i = 0; i < MAX_FILES; i++) {
-					if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
-						WM16(DE + 20, file_info[i].fatDate);
-						WM16(DE + 22, file_info[i].fatTime);
-						break;
-					}
-				}
+				msx_set_file_size(DE, size);
+				msx_set_file_time(DE, path);
+				file_written[DE] = 0;
 				WM8 (DE + 24, 0x40);
 				WM8 (DE + 25, 0);
 				WM16(DE + 26, 0);
@@ -606,6 +599,20 @@ void cpm_bdos()
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+#ifdef _MSX
+			if((fd = cpm_get_file_desc(path)) != -1) {
+				if(file_written[DE]) {
+					_chsize(fd, msx_get_file_size(DE));
+					FILETIME lTime, fTime;
+					DosDateTimeToFileTime(RM16(DE + 20), RM16(DE + 22), &lTime);
+					LocalFileTimeToFileTime(&lTime, &fTime);
+					SetFileTime((HANDLE)_get_osfhandle(fd), NULL, NULL, &fTime);
+				}
+				cpm_close_file(path);
+				A = 0;
+				return;
+			}
+#else
 			if((size = cpm_get_file_size(path)) >= 0) {
 				int ex = cpm_get_current_extent(DE);
 				int block = size - ex * 16384;
@@ -613,6 +620,7 @@ void cpm_bdos()
 				A = 0;
 				return;
 			}
+#endif
 		}
 		A = 0xff;
 		H = 0;
@@ -660,7 +668,7 @@ void cpm_bdos()
 									break;
 								}
 							}
-							if(flag && find_num < 256) {
+							if(flag && find_num < MAX_FIND_FILES) {
 								for(int i = 0; i < 11; i++) {
 									char v = cmp[i];
 									find_files[find_num][i] = ('a' <= v && v <= 'z') ? v + 'A' - 'a' : v;
@@ -671,10 +679,10 @@ void cpm_bdos()
 								HANDLE hFile = CreateFile(find.cFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 								if(hFile != INVALID_HANDLE_VALUE) {
 									if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
-										FILETIME time;
+										FILETIME fTime;
 										WORD fatDate, fatTime;
-										FileTimeToLocalFileTime(&fad.ftLastWriteTime, &time);
-										FileTimeToDosDateTime(&time, &fatDate, &fatTime);
+										FileTimeToLocalFileTime(&fad.ftLastWriteTime, &fTime);
+										FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
 										find_files[find_num][22] = (fatTime >> 0) & 0xff;
 										find_files[find_num][23] = (fatTime >> 8) & 0xff;
 										find_files[find_num][24] = (fatDate >> 0) & 0xff;
@@ -785,6 +793,11 @@ void cpm_bdos()
 					if(_lseek(fd, record * 128, SEEK_SET) != -1) {
 						cpm_memcpy(buffer, dma_addr, 128);
 						if(_write(fd, buffer, 128) == 128) {
+#ifdef _MSX
+							msx_set_file_size(DE, _filelength(fd));
+							msx_set_cur_time(DE);
+							file_written[DE] = 1;
+#endif
 							record++;
 							cpm_set_current_record(DE, record);
 							A = 0;
@@ -809,6 +822,16 @@ void cpm_bdos()
 							strcpy(file_info[i].path, path);
 							cpm_set_current_record(DE, 0);
 							cpm_set_record_count(DE, 128);
+#ifdef _MSX
+							msx_set_file_size(DE, 0);
+							msx_set_cur_time(DE);
+							file_written[DE] = 0;
+							WM8 (DE + 24, 0x40);
+							WM8 (DE + 25, 0);
+							WM16(DE + 26, 0);
+							WM16(DE + 28, 0);
+							WM16(DE + 30, 0);
+#endif
 							A = 0;
 							return;
 						}
@@ -854,8 +877,11 @@ void cpm_bdos()
 		dma_addr = DE;
 		break;
 	case 0x1b:
-#ifdef _MAX
-		A = 0xff;
+#ifdef _MSX
+		A = 9;
+		BC = 512;
+		DE = HL = 160;
+		IX = IY = 0;
 #else
 		// software write-protect current disc
 		if(default_drive < MAX_DRIVES) {
@@ -934,6 +960,11 @@ void cpm_bdos()
 					if(_lseek(fd, record * 128, SEEK_SET) != -1) {
 						cpm_memcpy(buffer, dma_addr, 128);
 						if(_write(fd, buffer, 128) == 128) {
+#ifdef _MSX
+							msx_set_file_size(DE, _filelength(fd));
+							msx_set_cur_time(DE);
+							file_written[DE] = 1;
+#endif
 							cpm_set_current_record(DE, record);
 							A = 0;
 							return;
@@ -963,15 +994,6 @@ void cpm_bdos()
 		record = cpm_get_current_record(DE);
 		cpm_set_random_record(DE, record);
 		break;
-	case 0x25:
-		// selectively reset disc drives
-		for(int i = 0; i < 16; i++) {
-			if(DE & (1 << i)) {
-				read_only[i] = 0;
-			}
-		}
-		A = 0;
-		break;
 #ifdef _MSX
 	case 0x26:
 		// random access write block
@@ -986,6 +1008,9 @@ void cpm_bdos()
 					uint16 count = 0;
 					if(HL == 0) {
 						if(_chsize(fd, record * rec_size) == 0) {
+							msx_set_file_size(DE, record * rec_size);
+							msx_set_cur_time(DE);
+							file_written[DE] = 1;
 							A = 0;
 							return;
 						}
@@ -998,6 +1023,11 @@ void cpm_bdos()
 							} else {
 								break;
 							}
+						}
+						if(count) {
+							msx_set_file_size(DE, _filelength(fd));
+							msx_set_cur_time(DE);
+							file_written[DE] = 1;
 						}
 						msx_set_random_record(DE, record + count);
 						if(count < HL) {
@@ -1109,6 +1139,15 @@ void cpm_bdos()
 		A = B = 0;
 		break;
 #else
+	case 0x25:
+		// selectively reset disc drives
+		for(int i = 0; i < 16; i++) {
+			if(DE & (1 << i)) {
+				read_only[i] = 0;
+			}
+		}
+		A = 0;
+		break;
 	case 0x6e:
 		// get/set string delimiter
 		if(DE == 0xffff) {
@@ -1184,18 +1223,6 @@ int cpm_get_file_desc(const char* path)
 	}
 	for(int i = 0; i < MAX_FILES; i++) {
 		if(file_info[i].fd == -1) {
-#ifdef _MSX
-			WIN32_FILE_ATTRIBUTE_DATA fad;
-			HANDLE hFile = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-			if(hFile != INVALID_HANDLE_VALUE) {
-				if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
-					FILETIME time;
-					FileTimeToLocalFileTime(&fad.ftLastWriteTime, &time);
-					FileTimeToDosDateTime(&time, &file_info[i].fatDate, &file_info[i].fatTime);
-				}
-				CloseHandle(hFile);
-			}
-#endif
 			if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE)) != -1) {
 				strcpy(file_info[i].path, path);
 				return file_info[i].fd;
@@ -1222,8 +1249,7 @@ int cpm_get_file_size(const char* path)
 {
 	for(int i = 0; i < MAX_FILES; i++) {
 		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
-			_lseek(file_info[i].fd, 0, SEEK_END);
-			int size = _tell(file_info[i].fd);
+			int size = _filelength(file_info[i].fd);
 			_close(file_info[i].fd);
 			file_info[i].fd = -1;
 			file_info[i].path[0] = '\0';
@@ -1232,8 +1258,7 @@ int cpm_get_file_size(const char* path)
 	}
 	int fd = _open(path, _O_RDONLY | _O_BINARY, _S_IREAD);
 	if(fd != -1) {
-		_lseek(fd, 0, SEEK_END);
-		int size = _tell(fd);
+		int size = _filelength(fd);
 		_close(fd);
 		return size;
 	}
@@ -1580,8 +1605,40 @@ void msx_set_file_size(uint16 fcb, int size)
 	WM32(fcb + 16, size);
 }
 
+int msx_get_file_size(uint16 fcb)
+{
+	return RM32(fcb + 16);
+}
+
 void msx_set_file_time(uint16 fcb, const char *path)
 {
+	WIN32_FILE_ATTRIBUTE_DATA fad;
+	FILETIME fTime;
+	WORD fatDate = 0, fatTime = 0;
+	
+	HANDLE hFile = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if(hFile != INVALID_HANDLE_VALUE) {
+		if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
+			FileTimeToLocalFileTime(&fad.ftLastWriteTime, &fTime);
+			FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
+		}
+		CloseHandle(hFile);
+	}
+	WM16(DE + 20, fatDate);
+	WM16(DE + 22, fatTime);
+}
+
+void msx_set_cur_time(uint16 fcb)
+{
+	SYSTEMTIME sTime;
+	FILETIME fTime;
+	WORD fatDate = 0, fatTime = 0;
+	
+	GetLocalTime(&sTime);
+	SystemTimeToFileTime(&sTime, &fTime);
+	FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
+	WM16(DE + 20, fatDate);
+	WM16(DE + 22, fatTime);
 }
 
 uint16 msx_get_record_size(uint16 fcb)
