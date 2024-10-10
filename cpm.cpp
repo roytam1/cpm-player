@@ -391,6 +391,9 @@ void main(int argc, char *argv[])
 
 void cpm_bios(int num)
 {
+
+//printf("BIOS %x\n", num);
+
 	switch(num)
 	{
 	case 0x00:
@@ -444,6 +447,8 @@ void cpm_bdos()
 	HANDLE hFind;
 	int fd;
 	
+//if(C!=6)
+//printf("BDOS C=%x E=%x\n", C,E);
 	switch(C)
 	{
 	case 0x00:
@@ -1287,6 +1292,8 @@ void cpm_set_record_count(uint16 fcb, uint8 count)
 #ifdef _MSX
 void msx_sub(uint16 addr)
 {
+//printf("SUB %x\n", addr);
+
 	switch(addr) {
 	case 0x0089: // GRPPRT
 		cons_putch(A);
@@ -1360,6 +1367,7 @@ void msx_sub(uint16 addr)
 
 void msx_main(uint16 addr)
 {
+//printf("MAIN %x\n", addr);
 	char string[512];
 	int len;
 	uint8 slt;
@@ -1782,8 +1790,8 @@ void update_rtc_time()
 #define CONS_CLEAR_BUFFER() { \
 	for(int y = 0; y < SCR_BUF_SIZE; y++) { \
 		for(int x = 0; x < 80; x++) { \
-			scr_buf[y][x].Char.AsciiChar = ' '; \
-			scr_buf[y][x].Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; \
+			scr_nul[y][x].Char.AsciiChar = ' '; \
+			scr_nul[y][x].Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; \
 		} \
 	} \
 }
@@ -1846,12 +1854,38 @@ retry:
 		}
 		return(EOF);
 	} else {
-		// XXX: need to consider function/cursor key
-		if(echo) {
-			return(_getche());
+		int code = _getch();
+		if(code == 0xe0) {
+			code = _getch();
+			switch(code) {
+			case 0x47: // Home
+				code = 0x0b;
+				break;
+			case 0x48: // Arrow Up
+				code = 0x1e;
+				break;
+			case 0x4b: // Arrow Left
+				code = 0x1d;
+				break;
+			case 0x4d: // Arrow Right
+				code = 0x1c;
+				break;
+			case 0x50: // Arrow Down
+				code = 0x1f;
+				break;
+			case 0x52: // Insert
+				code = 0x12;
+				break;
+			case 0x53: // Delete
+				code = 0x7f;
+				break;
+			default:
+				code = 0;
+			}
 		} else {
-			return(_getch());
+			if(echo) cons_putch(code);
 		}
+		return code;
 	}
 }
 
@@ -1913,7 +1947,7 @@ void cons_putch(UINT8 data)
 		if(++cr_count == 24) {
 			GetConsoleScreenBufferInfo(hStdout, &csbi);
 			SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-			WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+			WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 		}
 	} else if(data != 0x0a) {
 		cr_count = 0;
@@ -1929,7 +1963,98 @@ void cons_putch(UINT8 data)
 		co.X = csbi.dwCursorPosition.X;
 		co.Y = csbi.dwCursorPosition.Y;
 		WORD wAttributes = csbi.wAttributes;
+		int bottom = RM8(0xf3b1);
 		
+#ifdef _MSX
+		if(tmp[1] == 'Y') {
+			if(p == 4) {
+				co.X = tmp[3] - 0x20;
+				co.Y = tmp[2] - 0x20;
+				p = is_esc = 0;
+			}
+		} else if(tmp[1] == 'x') {
+			if(p == 3) {
+				if(tmp[2] == '4') {
+					GetConsoleCursorInfo(hStdout, &cur);
+					if(cur.dwSize != 100) {
+						cur.dwSize = 100;
+						SetConsoleCursorInfo(hStdout, &cur);
+					}
+				} if(tmp[2] == '5') {
+#if 0
+					GetConsoleCursorInfo(hStdout, &cur);
+					if(cur.bVisible) {
+						cur.bVisible = FALSE;
+						SetConsoleCursorInfo(hStdout, &cur);
+					}
+#endif
+				}
+				p = is_esc = 0;
+			}
+		} else if(tmp[1] == 'y') {
+			if(p == 3) {
+				if(tmp[2] == '4') {
+					GetConsoleCursorInfo(hStdout, &cur);
+					if(cur.dwSize != 25) {
+						cur.dwSize = 25;
+						SetConsoleCursorInfo(hStdout, &cur);
+					}
+				} if(tmp[2] == '5') {
+#if 0
+					GetConsoleCursorInfo(hStdout, &cur);
+					if(!cur.bVisible) {
+						cur.bVisible = TRUE;
+						SetConsoleCursorInfo(hStdout, &cur);
+					}
+#endif
+				}
+				p = is_esc = 0;
+			}
+		} else {
+			if(tmp[1] == 'A') {
+				co.Y--;
+			} else if(tmp[1] == 'B') {
+				co.Y++;
+			} else if(tmp[1] == 'C') {
+				co.X++;
+			} else if(tmp[1] == 'D') {
+				co.X--;
+			} else if(tmp[1] == 'E' || tmp[1] == 'j') {
+				SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, bottom - 1);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				co.X = co.Y = 0;
+			} else if(tmp[1] == 'H') {
+				co.X = co.Y = 0;
+			} else if(tmp[1] == 'J' || tmp[1] == 'K') {
+				SET_RECT(rect, co.X, co.Y, csbi.dwSize.X - 1, co.Y);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				if(tmp[1] == 'J' && (co.Y + 1) <= (bottom - 1)) {
+					SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, bottom - 1);
+					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				}
+			} else if(tmp[1] == 'L') {
+				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, bottom - 2);
+				ReadConsoleOutputA(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, bottom - 1);
+				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				co.X = 0;
+			} else if(tmp[1] == 'l') {
+				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+			} else if(tmp[1] == 'M') {
+				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, bottom - 1);
+				ReadConsoleOutputA(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, bottom - 2);
+				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				SET_RECT(rect, 0, bottom, csbi.dwSize.X - 1, bottom - 1);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				co.X = 0;
+			}
+			p = is_esc = 0;
+		}
+#else
 		if(tmp[1] == '(' || tmp[1] == '<') {
 			wAttributes |=  (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
 			wAttributes &= ~(BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE);
@@ -1940,7 +2065,7 @@ void cons_putch(UINT8 data)
 			p = is_esc = 0;
 		} else if(tmp[1] == '*') {
 			SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-			WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+			WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 			co.X = co.Y = 0;
 			p = is_esc = 0;
 		} else if(tmp[1] == '=') {
@@ -1995,52 +2120,52 @@ void cons_putch(UINT8 data)
 				} else if(data == 'J') {
 					if(param[0] == 0) {
 						SET_RECT(rect, co.X, co.Y, csbi.dwSize.X - 1, co.Y);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						if(co.Y < csbi.dwSize.Y - 1) {
 							SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-							WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+							WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						}
 					} else if(param[0] == 1) {
 						if(co.Y > 0) {
 							SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, co.Y - 1);
-							WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+							WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						}
 						SET_RECT(rect, 0, co.Y, co.X, co.Y);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					} else if(param[0] == 2) {
 						SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						co.X = co.Y = 0;
 					}
 				} else if(data == 'K') {
 					if(param[0] == 0) {
 						SET_RECT(rect, co.X, co.Y, csbi.dwSize.X - 1, co.Y);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					} else if(param[0] == 1) {
 						SET_RECT(rect, 0, co.Y, co.X, co.Y);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					} else if(param[0] == 2) {
 						SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					}
 				} else if(data == 'L') {
 					SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-					ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+					ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					SET_RECT(rect, 0, co.Y + param[0], csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-					WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					CONS_CLEAR_BUFFER()
 					SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y + param[0] - 1);
-					WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					co.X = 0;
 				} else if(data == 'M') {
 					if(co.Y + param[0] > csbi.dwSize.Y - 1) {
 						SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					} else {
 						SET_RECT(rect, 0, co.Y + param[0], csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 						CONS_CLEAR_BUFFER()
 					}
 					co.X = 0;
@@ -2049,7 +2174,7 @@ void cons_putch(UINT8 data)
 						GetConsoleCursorInfo(hStdout, &cur);
 						if(cur.bVisible) {
 							cur.bVisible = FALSE;
-							GetConsoleCursorInfo(hStdout, &cur);
+							SetConsoleCursorInfo(hStdout, &cur);
 						}
 					}
 				} else if(data == 'l') {
@@ -2057,7 +2182,7 @@ void cons_putch(UINT8 data)
 						GetConsoleCursorInfo(hStdout, &cur);
 						if(!cur.bVisible) {
 							cur.bVisible = TRUE;
-							GetConsoleCursorInfo(hStdout, &cur);
+							SetConsoleCursorInfo(hStdout, &cur);
 						}
 					}
 				} else if(data == 'm') {
@@ -2130,7 +2255,7 @@ void cons_putch(UINT8 data)
 				co.X--;
 			} else if(tmp[1] == 'E') {
 //				SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-//				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+//				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 //				co.X = co.Y = 0;
 			} else if(tmp[1] == 'H') {
 				co.X = co.Y = 0;
@@ -2138,47 +2263,47 @@ void cons_putch(UINT8 data)
 				wAttributes ^= 0xff;
 			} else if(tmp[1] == 'J' || tmp[1] == 'K' || tmp[1] == 'T') {
 				SET_RECT(rect, co.X, co.Y, csbi.dwSize.X - 1, co.Y);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				if(tmp[1] == 'J' && co.Y < csbi.dwSize.Y - 1) {
 					SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-					WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				}
 			} else if(tmp[1] == 'L') {
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 2);
-				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				CONS_CLEAR_BUFFER()
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				co.X = 0;
 			} else if(tmp[1] == 'M') {
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 2);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				CONS_CLEAR_BUFFER()
 				SET_RECT(rect, 0, csbi.dwSize.Y - 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				co.X = 0;
 			} else if(tmp[1] == 'd' || tmp[1] == 'o') {
 				if(tmp[1] == 'd' && co.Y > 0) {
 					SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, co.Y - 1);
-					WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				}
 				SET_RECT(rect, 0, co.Y, co.X - 1, co.Y);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 			} else if(tmp[1] == 'e') {
 				GetConsoleCursorInfo(hStdout, &cur);
 				if(!cur.bVisible) {
 					cur.bVisible = TRUE;
-					GetConsoleCursorInfo(hStdout, &cur);
+					SetConsoleCursorInfo(hStdout, &cur);
 				}
 			} else if(tmp[1] == 'f') {
 				GetConsoleCursorInfo(hStdout, &cur);
 				if(cur.bVisible) {
 					cur.bVisible = FALSE;
-					GetConsoleCursorInfo(hStdout, &cur);
+					SetConsoleCursorInfo(hStdout, &cur);
 				}
 			} else if(tmp[1] == 'j') {
 				stored_x = co.X;
@@ -2188,7 +2313,7 @@ void cons_putch(UINT8 data)
 				co.Y = stored_y;
 			} else if(tmp[1] == 'l') {
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
-				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				co.X = 0;
 			} else if(tmp[1] == 'p') {
 				wAttributes &= ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
@@ -2201,6 +2326,7 @@ void cons_putch(UINT8 data)
 			}
 			p = is_esc = 0;
 		}
+#endif
 		if(!is_esc) {
 			if(co.X < 0) {
 				co.X = 0;
@@ -2222,7 +2348,7 @@ void cons_putch(UINT8 data)
 	} else if(data == 0x1a) {
 		GetConsoleScreenBufferInfo(hStdout, &csbi);
 		SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-		WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 		co.X = co.Y = 0;
 		SetConsoleCursorPosition(hStdout, co);
 		p = 0;

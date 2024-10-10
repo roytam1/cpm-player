@@ -198,6 +198,7 @@ uint8 mem[0x10000];
 
 CPINFO cpinfo;
 HANDLE hStdout;
+CHAR_INFO scr_nul[SCR_BUF_SIZE][80];
 CHAR_INFO scr_buf[SCR_BUF_SIZE][80];
 COORD scr_buf_size;
 COORD scr_buf_pos;
