@@ -236,10 +236,15 @@ void main(int argc, char *argv[])
 	WM8 (0xf385, 0xc9);	// WRPRIM
 	WM8 (0xf38c, 0xc9);	// CLPRIM
 	
-	WM8 (0xf3ae, 39);	// LINL40
-	WM8 (0xf3af, 31);	// LINL32
-	WM8 (0xf3b0, 79);	// LINLEN
+	WM8 (0xf3ae, 80);	// LINL40
+	WM8 (0xf3af, 29);	// LINL32
+	WM8 (0xf3b0, 80);	// LINLEN
 	WM8 (0xf3b1, 24);	// CRTCNT
+	WM8 (0xf3b2, 14);	// CLMLST
+	
+	WM8 (0xf3e9, 15);	// FORCLR
+	WM8 (0xf3ea, 4);	// BAKCLR
+	WM8 (0xf3eb, 7);	// BDRCLR
 	
 	WM8 (0xfaf5, 0);	// DPPAGE
 	WM8 (0xfaf6, 0);	// ACPAGE
@@ -255,13 +260,15 @@ void main(int argc, char *argv[])
 	WM8 (0xfcc3, 0);	// EXPTBL #3
 	WM8 (0xfcc4, 0);	// EXPTBL #4
 	WM8 (0xfcc5, 0);	// SLTTBL #1
-	WM8 (0xfcc6, 0);	// SLTTBL #1
-	WM8 (0xfcc7, 0);	// SLTTBL #1
-	WM8 (0xfcc8, 0);	// SLTTBL #1
+	WM8 (0xfcc6, 0);	// SLTTBL #2
+	WM8 (0xfcc7, 0);	// SLTTBL #3
+	WM8 (0xfcc8, 0);	// SLTTBL #4
 	
 	WM8 (0xffca, 0xc9);	// FCALL
 	WM8 (0xffcf, 0xc9);	// DISINT
 	WM8 (0xffd4, 0xc9);	// ENAINT
+	
+	WM8 (0xfff7, 0);	// ROMSLT
 	
 	kanji_mode = 0;
 	kanji1_hi = kanji1_lo = kanji1_idx = 0;
@@ -434,7 +441,8 @@ void cpm_bios(int num)
 
 void cpm_bdos()
 {
-	char string[512], path[MAX_PATH];
+	char string[512];
+	char path[MAX_PATH], dest[MAX_PATH];
 	int len, drive, size;
 	uint32 record;
 #ifdef _MSX
@@ -447,8 +455,6 @@ void cpm_bdos()
 	HANDLE hFind;
 	int fd;
 	
-//if(C!=6)
-//printf("BDOS C=%x E=%x\n", C,E);
 	switch(C)
 	{
 	case 0x00:
@@ -491,22 +497,21 @@ void cpm_bdos()
 			cons_putch(E);
 		}
 		break;
-	case 0x07:
 #ifdef _MSX
+	case 0x07:
+	case 0x08:
 		A = cons_getch();
+		break;
 #else
+	case 0x07:
 		// auxiliary input status
 		A = 0;
-#endif
 		break;
 	case 0x08:
-#ifdef _MSX
-		A = cons_getch();
-#else
 		// auxiliary output status
 		A = 0xff;
-#endif
 		break;
+#endif
 	case 0x09:
 		// output string
 		for(int i = 0; i < 256; i++) {
@@ -570,9 +575,10 @@ void cpm_bdos()
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-			if((size = cpm_get_file_size(path)) >= 0) {
+			cpm_close_file(path); // just in case
+			if((fd = cpm_get_file_desc(path)) != -1) {
 #ifdef _MSX
-				msx_set_file_size(DE, size);
+				msx_set_file_size(DE, _filelength(fd));
 				msx_set_file_time(DE, path);
 				file_written[DE] = 0;
 				WM8 (DE + 24, 0x40);
@@ -582,7 +588,7 @@ void cpm_bdos()
 				WM16(DE + 30, 0);
 #else
 				int ex = cpm_get_current_extent(DE);
-				int block = size - ex * 16384;
+				int block = _filelength(fd) - ex * 16384;
 				cpm_set_alloc_vector(DE, block);
 #endif
 				cpm_set_current_record(DE, 0);
@@ -599,8 +605,8 @@ void cpm_bdos()
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-#ifdef _MSX
 			if((fd = cpm_get_file_desc(path)) != -1) {
+#ifdef _MSX
 				if(file_written[DE]) {
 					_chsize(fd, msx_get_file_size(DE));
 					FILETIME lTime, fTime;
@@ -608,19 +614,15 @@ void cpm_bdos()
 					LocalFileTimeToFileTime(&lTime, &fTime);
 					SetFileTime((HANDLE)_get_osfhandle(fd), NULL, NULL, &fTime);
 				}
+#else
+				int ex = cpm_get_current_extent(DE);
+				int block = _filelength(fd) - ex * 16384;
+				cpm_set_alloc_vector(DE, block);
+#endif
 				cpm_close_file(path);
 				A = 0;
 				return;
 			}
-#else
-			if((size = cpm_get_file_size(path)) >= 0) {
-				int ex = cpm_get_current_extent(DE);
-				int block = size - ex * 16384;
-				cpm_set_alloc_vector(DE, block);
-				A = 0;
-				return;
-			}
-#endif
 		}
 		A = 0xff;
 		H = 0;
@@ -675,21 +677,18 @@ void cpm_bdos()
 								}
 								find_files[find_num][11] = drive;
 #ifdef _MSX
-								WIN32_FILE_ATTRIBUTE_DATA fad;
-								HANDLE hFile = CreateFile(find.cFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-								if(hFile != INVALID_HANDLE_VALUE) {
-									if(GetFileTime(hFile, &fad.ftCreationTime, &fad.ftLastAccessTime, &fad.ftLastWriteTime)) {
-										FILETIME fTime;
-										WORD fatDate, fatTime;
-										FileTimeToLocalFileTime(&fad.ftLastWriteTime, &fTime);
-										FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
-										find_files[find_num][22] = (fatTime >> 0) & 0xff;
-										find_files[find_num][23] = (fatTime >> 8) & 0xff;
-										find_files[find_num][24] = (fatDate >> 0) & 0xff;
-										find_files[find_num][25] = (fatDate >> 8) & 0xff;
-									}
-									CloseHandle(hFile);
-								}
+								FILETIME fTime;
+								WORD fatDate = 0, fatTime = 0;
+								FileTimeToLocalFileTime(&find.ftLastWriteTime, &fTime);
+								FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
+								find_files[find_num][22] = (fatTime >> 0) & 0xff;
+								find_files[find_num][23] = (fatTime >> 8) & 0xff;
+								find_files[find_num][24] = (fatDate >> 0) & 0xff;
+								find_files[find_num][25] = (fatDate >> 8) & 0xff;
+								find_files[find_num][28] = (find.nFileSizeLow >>  0) & 0xff;
+								find_files[find_num][29] = (find.nFileSizeLow >>  8) & 0xff;
+								find_files[find_num][30] = (find.nFileSizeLow >> 16) & 0xff;
+								find_files[find_num][31] = (find.nFileSizeLow >> 24) & 0xff;
 								if(find.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
 									find_files[find_num][32] |= 0x01;
 								}
@@ -718,26 +717,22 @@ void cpm_bdos()
 	case 0x12:
 		// search for next
 		if(find_idx < find_num) {
-			cpm_create_path(find_files[find_idx][11], find_files[find_idx], path);
-			if((size = cpm_get_file_size(path)) >= 0) {
-				cpm_memset(dma_addr, 0, 32);
+			cpm_memset(dma_addr, 0, 32);
 #ifdef _MSX
-//				find_files[find_idx][11] = find_files[find_idx][32];
-				find_files[find_idx][12] = find_files[find_idx][32];
-				find_files[find_idx][28] = (size >>  0) & 0xff;
-				find_files[find_idx][29] = (size >>  8) & 0xff;
-				find_files[find_idx][30] = (size >> 16) & 0xff;
-				find_files[find_idx][31] = (size >> 24) & 0xff;
-				cpm_memcpy(dma_addr + 1, find_files[find_idx], 32);
+			find_files[find_idx][12] = find_files[find_idx][32];
+			cpm_memcpy(dma_addr + 1, find_files[find_idx], 32);
 #else
-				cpm_memcpy(dma_addr + 1, find_files[find_idx], 11);
-				WM8(dma_addr + 13, (size < 16384) ? ((size >> 7) & 0xff) : 127);
-				cpm_set_alloc_vector(dma_addr, size);
+			cpm_memcpy(dma_addr + 1, find_files[find_idx], 11);
+			size = find_files[find_idx][31];
+			size = (size << 8) | find_files[find_idx][30];
+			size = (size << 8) | find_files[find_idx][29];
+			size = (size << 8) | find_files[find_idx][28];
+			WM8(dma_addr + 13, (size < 16384) ? ((size >> 7) & 0xff) : 127);
+			cpm_set_alloc_vector(dma_addr, size);
 #endif
-				find_idx++;
-				A = 0;
-				return;
-			}
+			find_idx++;
+			A = 0;
+			return;
 		}
 		A = 0xff;
 		H = 0;
@@ -749,7 +744,8 @@ void cpm_bdos()
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 				cpm_close_file(path);
-				if(DeleteFile(path)) {
+				sprintf(string, "DEL /Q %s >NUL 2>&1", path);
+				if(system(string) == 0) {
 					A = 0;
 					return;
 				}
@@ -815,28 +811,22 @@ void cpm_bdos()
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-				cpm_close_file(path);
-				for(int i = 0; i < MAX_FILES; i++) {
-					if(file_info[i].fd == -1) {
-						if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE)) != -1) {
-							strcpy(file_info[i].path, path);
-							cpm_set_current_record(DE, 0);
-							cpm_set_record_count(DE, 128);
+				cpm_close_file(path); // just in case
+				if((fd = cpm_create_file(path)) != -1) {
 #ifdef _MSX
-							msx_set_file_size(DE, 0);
-							msx_set_cur_time(DE);
-							file_written[DE] = 0;
-							WM8 (DE + 24, 0x40);
-							WM8 (DE + 25, 0);
-							WM16(DE + 26, 0);
-							WM16(DE + 28, 0);
-							WM16(DE + 30, 0);
+					msx_set_file_size(DE, 0);
+					msx_set_cur_time(DE);
+					file_written[DE] = 0;
+					WM8 (DE + 24, 0x40);
+					WM8 (DE + 25, 0);
+					WM16(DE + 26, 0);
+					WM16(DE + 28, 0);
+					WM16(DE + 30, 0);
 #endif
-							A = 0;
-							return;
-						}
-						break;
-					}
+					cpm_set_current_record(DE, 0);
+					cpm_set_record_count(DE, 128);
+					A = 0;
+					return;
 				}
 			}
 		}
@@ -849,15 +839,18 @@ void cpm_bdos()
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-				cpm_create_path(drive, cpm_get_mem_array(DE + 17), string);
+				cpm_create_path(0, cpm_get_mem_array(DE + 17), dest);
+#ifndef _MSX
 				if((size = cpm_get_file_size(path)) >= 0) {
 					int ex = cpm_get_current_extent(DE);
 					int block = size - ex * 16384;
 					cpm_set_alloc_vector(DE, block);
-					if(MoveFile(path, string)) {
-						A = 0;
-						return;
-					}
+				}
+#endif
+				sprintf(string, "REN %s %s >NUL 2>&1", path, dest);
+				if(system(string) == 0) {
+					A = 0;
+					return;
 				}
 			}
 		}
@@ -867,6 +860,9 @@ void cpm_bdos()
 	case 0x18:
 		// return bitmap of logged-in drives
 		HL = login_drive;
+#ifdef _MSX
+		H = 0;
+#endif
 		break;
 	case 0x19:
 		// return current drive
@@ -876,18 +872,19 @@ void cpm_bdos()
 		// set dma address
 		dma_addr = DE;
 		break;
-	case 0x1b:
 #ifdef _MSX
+	case 0x1b:
 		A = 9;
 		BC = 512;
 		DE = HL = 160;
 		IX = IY = 0;
+		break;
 #else
+	case 0x1b:
 		// software write-protect current disc
 		if(default_drive < MAX_DRIVES) {
 			read_only[default_drive] = 1;
 		}
-#endif
 		break;
 	case 0x1c:
 		// return bitmap of read-only drives
@@ -924,6 +921,7 @@ void cpm_bdos()
 			user_id = E;
 		}
 		break;
+#endif
 	case 0x21:
 		// random access read record
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
@@ -957,6 +955,22 @@ void cpm_bdos()
 				record = cpm_get_random_record(DE);
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 				if((fd = cpm_get_file_desc(path)) != -1) {
+					if(C == 0x28) {
+						if((size = _filelength(fd)) < (int)(record * 128)) {
+							memset(buffer, 0, sizeof(buffer));
+							size = record * 128 - size;
+							_lseek(fd, 0, SEEK_END);
+							while(size > 0) {
+								if(size > sizeof(buffer)) {
+									_write(fd, buffer, sizeof(buffer));
+									size -= sizeof(buffer);
+								} else {
+									_write(fd, buffer, size);
+									break;
+								}
+							}
+						}
+					}
 					if(_lseek(fd, record * 128, SEEK_SET) != -1) {
 						cpm_memcpy(buffer, dma_addr, 128);
 						if(_write(fd, buffer, 128) == 128) {
@@ -980,8 +994,8 @@ void cpm_bdos()
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-			if((size = cpm_get_file_size(path)) >= 0) {
-				cpm_set_random_record(DE, (size + 127) >> 7);
+			if((fd = cpm_get_file_desc(path)) != -1) {
+				cpm_set_random_record(DE, (_filelength(fd) + 127) >> 7);
 				A = 0;
 				return;
 			}
@@ -1165,231 +1179,7 @@ void cpm_bdos()
 	}
 }
 
-void cpm_memset(uint16 addr, int c, size_t n)
-{
-	for(size_t i = 0; i < n; i++) {
-		WM8(addr + i, c);
-	}
-}
-
-void cpm_memcpy(uint16 dst, const void *src, size_t n)
-{
-	for(size_t i = 0; i < n; i++) {
-		WM8(dst + i, ((uint8 *)src)[i]);
-	}
-}
-
-void cpm_memcpy(void *dst, uint16 src, size_t n)
-{
-	for(size_t i = 0; i < n; i++) {
-		((uint8 *)dst)[i] = RM8(src + i);
-	}
-}
-
-const uint8* cpm_get_mem_array(uint16 addr)
-{
-	static uint8 array[11];
-	
-	for(int i = 0; i < 11; i++) {
-		array[i] = RM8(addr + i);
-	}
-	return array;
-}
-
-void cpm_create_path(int drive, const uint8* src, char* dest)
-{
-	char file[9], ext[4];
-	for(int i = 0; i < 8; i++) {
-		file[i] = (src[i] == 0x20) ? '\0' : src[i];
-	}
-	file[8] = '\0';
-	for(int i = 0; i < 3; i++) {
-		ext[i] = (src[i + 8] == 0x20) ? '\0' : src[i + 8];
-	}
-	ext[3] = '\0';
-	if(drive) {
-		sprintf(dest, "%c\\%s.%s", 'A' + drive, file, ext);
-	} else {
-		sprintf(dest, "%s.%s", file, ext);
-	}
-}
-
-int cpm_get_file_desc(const char* path)
-{
-	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
-			return file_info[i].fd;
-		}
-	}
-	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_info[i].fd == -1) {
-			if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE)) != -1) {
-				strcpy(file_info[i].path, path);
-				return file_info[i].fd;
-			}
-			break;
-		}
-	}
-	return -1;
-}
-
-void cpm_close_file(const char* path)
-{
-	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
-			_close(file_info[i].fd);
-			file_info[i].fd = -1;
-			file_info[i].path[0] = '\0';
-			break;
-		}
-	}
-}
-
-int cpm_get_file_size(const char* path)
-{
-	for(int i = 0; i < MAX_FILES; i++) {
-		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
-			int size = _filelength(file_info[i].fd);
-			_close(file_info[i].fd);
-			file_info[i].fd = -1;
-			file_info[i].path[0] = '\0';
-			return size;
-		}
-	}
-	int fd = _open(path, _O_RDONLY | _O_BINARY, _S_IREAD);
-	if(fd != -1) {
-		int size = _filelength(fd);
-		_close(fd);
-		return size;
-	}
-	return -1;
-}
-
-int cpm_get_drive(uint16 fcb)
-{
-	return RM8(fcb) ? (RM8(fcb) - 1) : default_drive;
-}
-
-int cpm_get_current_extent(uint16 fcb)
-{
-	return (RM8(fcb + 12) & 0x1f) | (RM8(fcb + 13) << 5);
-}
-
-void cpm_set_alloc_vector(uint16 fcb, int block)
-{
-	for(int i = 0; i < 16; i++) {
-		WM8(fcb + i + 16, (block > i * 1024) ? i + 1 : 0);
-	}
-}
-
-uint32 cpm_get_current_record(uint16 fcb)
-{
-	uint32 record = RM8(fcb + 32) & 0x7f;
-	record += (RM8(fcb + 12) & 0x1f) << 7;
-	record += RM8(fcb + 13) << 12;
-	record += RM8(fcb + 14) << 20;
-	return record;
-}
-
-void cpm_set_current_record(uint16 fcb, uint32 record)
-{
-	WM8(fcb + 32, record & 0x7f);
-	WM8(fcb + 12, (record >> 7) & 0x1f);
-	WM8(fcb + 13, (record >> 12) & 0xff);
-	WM8(fcb + 14, (record >> 20) & 0xff);
-}
-
-uint32 cpm_get_random_record(uint16 fcb)
-{
-	return RM24(fcb + 33);
-}
-
-void cpm_set_random_record(uint16 fcb, uint32 record)
-{
-	WM24(fcb + 33, record);
-}
-
-void cpm_set_record_count(uint16 fcb, uint8 count)
-{
-	WM8(fcb + 15, count);
-}
-
 #ifdef _MSX
-void msx_sub(uint16 addr)
-{
-//printf("SUB %x\n", addr);
-
-	switch(addr) {
-	case 0x0089: // GRPPRT
-		cons_putch(A);
-		break;
-	case 0x00d1: // CHGMOD
-		if(A == 0 || A == 1) {
-			WM8(0xf3b0, RM8(A == 0 ? 0xf3ae : 0xf3af));
-		}
-		system("cls");
-		break;
-	case 0x00d5: // INITXT
-		WM8(0xf3b0, RM8(0xf3ae));
-		system("cls");
-		break;
-	case 0x00d9: // INIT32
-		WM8(0xf3b0, RM8(0xf3af));
-		system("cls");
-		break;
-	case 0x0115: // CLSSUB
-		system("cls");
-		break;
-	case 0x017d: // BEEP
-		MessageBeep(-1);
-		break;
-	case 0x1ad: // NEWPAD
-		A = 0;
-		break;
-	case 0x1bd: // KNJPRT
-		{
-			uint16 code = jis_to_sjis(BC);
-			cons_putch((code >> 8) & 0xff);
-			cons_putch((code >> 0) & 0xff);
-		}
-		break;
-	case 0x01f5: // RECLK
-		{
-			OUT8(0xb4, 0x0d);
-			uint8 mode = IN8(0xb5);
-			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
-			OUT8(0xb4, C & 0x0f);
-			A = IN8(0xb5);
-			OUT8(0xb4, 0x0d);
-			OUT8(0xb5, mode);
-		}
-		break;
-	case 0x01f9: // WRTLK
-		{
-			OUT8(0xb4, 0x0d);
-			uint8 mode = IN8(0xb5);
-			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
-			OUT8(0xb4, C & 0x0f);
-			OUT8(0xb5, A);
-			OUT8(0xb4, 0x0d);
-			OUT8(0xb5, mode);
-		}
-		break;
-	case 0x4010: // DSKIO
-	case 0x4013: // DSKCHG
-	case 0x401c: // DSKFMT
-		A = 2; // Not Ready
-		F |= CF;
-		break;
-	case 0x4019: // CHOICE
-		HL = 0;
-		break;
-//	default:
-//		fprintf(stderr, "SUB %04Xh\n", addr);
-//		exit(1);
-	}
-}
-
 void msx_main(uint16 addr)
 {
 //printf("MAIN %x\n", addr);
@@ -1449,15 +1239,15 @@ void msx_main(uint16 addr)
 		} else if(A == 1) {
 			WM8(0xf3b0, RM8(0xf3af));
 		}
-		system("cls");
+		system("CLS");
 		break;
 	case 0x006c: // INITXT
 		WM8(0xf3b0, RM8(0xf3ae));
-		system("cls");
+		system("CLS");
 		break;
 	case 0x006f: // INIT32
 		WM8(0xf3b0, RM8(0xf3af));
-		system("cls");
+		system("CLS");
 		break;
 	case 0x008d: // GRPPRT
 		cons_putch(A);
@@ -1501,13 +1291,13 @@ PINLIN:
 		MessageBeep(-1);
 		break;
 	case 0x00c3: // CLS
-		system("cls");
+		system("CLS");
 		break;
 	case 0x00c6: // POSIT
 		cons_cursor(H, L);
 		break;
 	case 0x00d2: // TOTEXT
-		system("cls");
+		system("CLS");
 		break;
 	case 0x00d8: // GTTRIG
 		if(A == 0) {
@@ -1600,6 +1390,243 @@ PINLIN:
 	}
 }
 
+void msx_sub(uint16 addr)
+{
+//printf("SUB %x\n", addr);
+
+	switch(addr) {
+	case 0x0089: // GRPPRT
+		cons_putch(A);
+		break;
+	case 0x00d1: // CHGMOD
+		if(A == 0 || A == 1) {
+			WM8(0xf3b0, RM8(A == 0 ? 0xf3ae : 0xf3af));
+		}
+		system("CLS");
+		break;
+	case 0x00d5: // INITXT
+		WM8(0xf3b0, RM8(0xf3ae));
+		system("CLS");
+		break;
+	case 0x00d9: // INIT32
+		WM8(0xf3b0, RM8(0xf3af));
+		system("CLS");
+		break;
+	case 0x0115: // CLSSUB
+		system("CLS");
+		break;
+	case 0x017d: // BEEP
+		MessageBeep(-1);
+		break;
+	case 0x1ad: // NEWPAD
+		A = 0;
+		break;
+	case 0x1bd: // KNJPRT
+		{
+			uint16 code = jis_to_sjis(BC);
+			cons_putch((code >> 8) & 0xff);
+			cons_putch((code >> 0) & 0xff);
+		}
+		break;
+	case 0x01f5: // RECLK
+		{
+			OUT8(0xb4, 0x0d);
+			uint8 mode = IN8(0xb5);
+			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
+			OUT8(0xb4, C & 0x0f);
+			A = IN8(0xb5);
+			OUT8(0xb4, 0x0d);
+			OUT8(0xb5, mode);
+		}
+		break;
+	case 0x01f9: // WRTLK
+		{
+			OUT8(0xb4, 0x0d);
+			uint8 mode = IN8(0xb5);
+			OUT8(0xb5, (mode & ~3) | ((C >> 4) & 3));
+			OUT8(0xb4, C & 0x0f);
+			OUT8(0xb5, A);
+			OUT8(0xb4, 0x0d);
+			OUT8(0xb5, mode);
+		}
+		break;
+	case 0x4010: // DSKIO
+	case 0x4013: // DSKCHG
+	case 0x401c: // DSKFMT
+		A = 2; // Not Ready
+		F |= CF;
+		break;
+	case 0x4019: // CHOICE
+		HL = 0;
+		break;
+//	default:
+//		fprintf(stderr, "SUB %04Xh\n", addr);
+//		exit(1);
+	}
+}
+#endif
+
+void cpm_memset(uint16 addr, int c, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		WM8(addr + i, c);
+	}
+}
+
+void cpm_memcpy(uint16 dst, const void *src, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		WM8(dst + i, ((uint8 *)src)[i]);
+	}
+}
+
+void cpm_memcpy(void *dst, uint16 src, size_t n)
+{
+	for(size_t i = 0; i < n; i++) {
+		((uint8 *)dst)[i] = RM8(src + i);
+	}
+}
+
+const uint8* cpm_get_mem_array(uint16 addr)
+{
+	static uint8 array[11];
+	
+	for(int i = 0; i < 11; i++) {
+		array[i] = RM8(addr + i);
+	}
+	return array;
+}
+
+void cpm_create_path(int drive, const uint8* src, char* dest)
+{
+	char file[9], ext[4];
+	for(int i = 0; i < 8; i++) {
+		file[i] = (src[i] == 0x20) ? '\0' : src[i];
+	}
+	file[8] = '\0';
+	for(int i = 0; i < 3; i++) {
+		ext[i] = (src[i + 8] == 0x20) ? '\0' : src[i + 8];
+	}
+	ext[3] = '\0';
+	if(drive) {
+		sprintf(dest, "%c\\%s.%s", 'A' + drive, file, ext);
+	} else {
+		sprintf(dest, "%s.%s", file, ext);
+	}
+}
+
+int cpm_open_file(const char* path)
+{
+	return cpm_get_file_desc(path);
+}
+
+int cpm_create_file(const char* path)
+{
+	for(int i = 0; i < MAX_FILES; i++) {
+		if(file_info[i].fd == -1) {
+			if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE)) != -1) {
+				strcpy(file_info[i].path, path);
+				return file_info[i].fd;
+			}
+			break;
+		}
+	}
+	return -1;
+}
+
+int cpm_get_file_desc(const char* path)
+{
+	for(int i = 0; i < MAX_FILES; i++) {
+		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+			return file_info[i].fd;
+		}
+	}
+	for(int i = 0; i < MAX_FILES; i++) {
+		if(file_info[i].fd == -1) {
+			if((file_info[i].fd = _open(path, _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE)) != -1) {
+				strcpy(file_info[i].path, path);
+				return file_info[i].fd;
+			}
+			break;
+		}
+	}
+	return -1;
+}
+
+void cpm_close_file(const char* path)
+{
+	for(int i = 0; i < MAX_FILES; i++) {
+		if(file_info[i].fd != -1 && stricmp(file_info[i].path, path) == 0) {
+			_close(file_info[i].fd);
+			file_info[i].fd = -1;
+			file_info[i].path[0] = '\0';
+			break;
+		}
+	}
+}
+
+int cpm_get_file_size(const char* path)
+{
+	int fd, size;
+	
+	if((fd = cpm_get_file_desc(path)) != -1) {
+		size = _filelength(fd);
+		cpm_close_file(path);
+		return size;
+	}
+	return -1;
+}
+
+int cpm_get_drive(uint16 fcb)
+{
+	return RM8(fcb) ? (RM8(fcb) - 1) : default_drive;
+}
+
+int cpm_get_current_extent(uint16 fcb)
+{
+	return (RM8(fcb + 12) & 0x1f) | (RM8(fcb + 13) << 5);
+}
+
+void cpm_set_alloc_vector(uint16 fcb, int block)
+{
+	for(int i = 0; i < 16; i++) {
+		WM8(fcb + i + 16, (block > i * 1024) ? i + 1 : 0);
+	}
+}
+
+uint32 cpm_get_current_record(uint16 fcb)
+{
+	uint32 record = RM8(fcb + 32) & 0x7f;
+	record += (RM8(fcb + 12) & 0x1f) << 7;
+	record += RM8(fcb + 13) << 12;
+	record += RM8(fcb + 14) << 20;
+	return record;
+}
+
+void cpm_set_current_record(uint16 fcb, uint32 record)
+{
+	WM8(fcb + 32, record & 0x7f);
+	WM8(fcb + 12, (record >> 7) & 0x1f);
+	WM8(fcb + 13, (record >> 12) & 0xff);
+	WM8(fcb + 14, (record >> 20) & 0xff);
+}
+
+uint32 cpm_get_random_record(uint16 fcb)
+{
+	return RM24(fcb + 33);
+}
+
+void cpm_set_random_record(uint16 fcb, uint32 record)
+{
+	WM24(fcb + 33, record);
+}
+
+void cpm_set_record_count(uint16 fcb, uint8 count)
+{
+	WM8(fcb + 15, count);
+}
+
+#ifdef _MSX
 void msx_set_file_size(uint16 fcb, int size)
 {
 	WM32(fcb + 16, size);
@@ -1727,7 +1754,6 @@ void set_mapper(int page, int seg)
 	rd_bank[3][page] = mem + 0x4000 * seg;
 	wr_bank[3][page] = mem + 0x4000 * seg;
 	mapper[page] = seg;
-
 }
 
 uint8 get_mapper(int page)

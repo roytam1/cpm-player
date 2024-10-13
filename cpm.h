@@ -89,7 +89,7 @@ typedef union {
 ---------------------------------------------------------------------------- */
 
 #define MAX_DRIVES	1
-#define MAX_FILES	16
+#define MAX_FILES	256
 #define MAX_FIND_FILES	1024
 #define TPA_BASE	0x100
 #ifdef _MSX
@@ -127,6 +127,8 @@ void cpm_memcpy(void *dst, uint16 src, size_t n);
 const uint8* cpm_get_mem_array(uint16 addr);
 
 void cpm_create_path(int drive, const uint8* src, char* dest);
+int cpm_open_file(const char* path);
+int cpm_create_file(const char* path);
 int cpm_get_file_desc(const char* path);
 void cpm_close_file(const char* path);
 int cpm_get_file_size(const char* path);
@@ -141,6 +143,8 @@ void cpm_set_random_record(uint16 fcb, uint32 record);
 void cpm_set_record_count(uint16 fcb, uint8 count);
 
 #ifdef _MSX
+void msx_main(uint16 addr);
+void msx_sub(uint16 addr);
 void msx_set_file_size(uint16 fcb, int size);
 int msx_get_file_size(uint16 fcb);
 void msx_set_file_time(uint16 fcb, const char *path);
