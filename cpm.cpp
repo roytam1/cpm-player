@@ -443,6 +443,7 @@ void cpm_bdos()
 {
 	char string[512];
 	char path[MAX_PATH], dest[MAX_PATH];
+	uint8 name[11];
 	int len, drive, size;
 	uint32 record;
 #ifdef _MSX
@@ -574,9 +575,23 @@ void cpm_bdos()
 		// open file
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
+			fd = -1;
 			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-			cpm_close_file(path); // just in case
-			if((fd = cpm_get_file_desc(path)) != -1) {
+			if((hFind = FindFirstFile(path, &find)) != INVALID_HANDLE_VALUE) {
+				do {
+					if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+						if(cpm_set_file_name(find.cFileName, name)) {
+							if((fd = cpm_open_file(find.cFileName)) != -1) {
+								break;
+							}
+						}
+					}
+				}
+				while(FindNextFile(hFind, &find));
+				FindClose(hFind);
+			}
+			if(fd != -1) {
+				cpm_memcpy(DE + 1, name, 11);
 #ifdef _MSX
 				msx_set_file_size(DE, _filelength(fd));
 				msx_set_file_time(DE, path);
@@ -593,6 +608,7 @@ void cpm_bdos()
 #endif
 				cpm_set_current_record(DE, 0);
 				cpm_set_record_count(DE, 128);
+				cpm_close_file(path);
 				A = 0;
 				return;
 			}
@@ -633,79 +649,44 @@ void cpm_bdos()
 		find_num = find_idx = 0;
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			login_drive |= 1 << drive;
-			if((hFind = FindFirstFile("*.*", &find)) != INVALID_HANDLE_VALUE) {
+			cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
+			if((hFind = FindFirstFile(path, &find)) != INVALID_HANDLE_VALUE) {
 				do {
-//#ifdef _MSX
-//					if(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-//						if(strcmp(find.cFileName, ".") == 0 || strcmp(find.cFileName, "..") == 0) {
-//							continue;
-//						}
-//					}
-//#else
-					if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-//#endif
-					{
-						char file[MAX_PATH], ext[MAX_PATH];
-						strcpy(file, find.cFileName);
-						char *pt = strrchr(file, '.');
-						if(pt) {
-							strcpy(ext, pt + 1);
-							pt[0] = '\0';
-						} else {
-							ext[0] = '\0';
-						}
-						if(strlen(file) <= 8 && strlen(ext) <= 3) {
-							char cmp[11];
-							memset(cmp, 0x20, sizeof(cmp));
-							memcpy(cmp, file, strlen(file));
-							memcpy(cmp + 8, ext, strlen(ext));
-							int flag = 1;
-							for(int i = 0; i < 11; i++) {
-								char v1 = RM8(DE + i + 1);
-								char v2 = cmp[i];
-								v1 = ('a' <= v1 && v1 <= 'z') ? v1 + 'A' - 'a' : v1;
-								v2 = ('a' <= v2 && v2 <= 'z') ? v2 + 'A' - 'a' : v2;
-								if(v1 != v2 && v1 != '?') {
-									flag = 0;
-									break;
-								}
-							}
-							if(flag && find_num < MAX_FIND_FILES) {
-								for(int i = 0; i < 11; i++) {
-									char v = cmp[i];
-									find_files[find_num][i] = ('a' <= v && v <= 'z') ? v + 'A' - 'a' : v;
-								}
-								find_files[find_num][11] = drive;
+					if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+						if(cpm_set_file_name(find.cFileName, name)) {
+							memcpy(find_files[find_num], name, 11);
+							find_files[find_num][11] = drive;
 #ifdef _MSX
-								FILETIME fTime;
-								WORD fatDate = 0, fatTime = 0;
-								FileTimeToLocalFileTime(&find.ftLastWriteTime, &fTime);
-								FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
-								find_files[find_num][22] = (fatTime >> 0) & 0xff;
-								find_files[find_num][23] = (fatTime >> 8) & 0xff;
-								find_files[find_num][24] = (fatDate >> 0) & 0xff;
-								find_files[find_num][25] = (fatDate >> 8) & 0xff;
-								find_files[find_num][28] = (find.nFileSizeLow >>  0) & 0xff;
-								find_files[find_num][29] = (find.nFileSizeLow >>  8) & 0xff;
-								find_files[find_num][30] = (find.nFileSizeLow >> 16) & 0xff;
-								find_files[find_num][31] = (find.nFileSizeLow >> 24) & 0xff;
-								if(find.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
-									find_files[find_num][32] |= 0x01;
-								}
-								if(find.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) {
-									find_files[find_num][32] |= 0x02;
-								}
-								if(find.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) {
-									find_files[find_num][32] |= 0x04;
-								}
-								if(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-									find_files[find_num][32] |= 0x10;
-								}
-								if(find.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) {
-									find_files[find_num][32] |= 0x20;
-								}
+							FILETIME fTime;
+							WORD fatDate = 0, fatTime = 0;
+							FileTimeToLocalFileTime(&find.ftLastWriteTime, &fTime);
+							FileTimeToDosDateTime(&fTime, &fatDate, &fatTime);
+							find_files[find_num][22] = (fatTime >> 0) & 0xff;
+							find_files[find_num][23] = (fatTime >> 8) & 0xff;
+							find_files[find_num][24] = (fatDate >> 0) & 0xff;
+							find_files[find_num][25] = (fatDate >> 8) & 0xff;
+							find_files[find_num][28] = (find.nFileSizeLow >>  0) & 0xff;
+							find_files[find_num][29] = (find.nFileSizeLow >>  8) & 0xff;
+							find_files[find_num][30] = (find.nFileSizeLow >> 16) & 0xff;
+							find_files[find_num][31] = (find.nFileSizeLow >> 24) & 0xff;
+							if(find.dwFileAttributes & FILE_ATTRIBUTE_READONLY) {
+								find_files[find_num][32] |= 0x01;
+							}
+							if(find.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) {
+								find_files[find_num][32] |= 0x02;
+							}
+							if(find.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) {
+								find_files[find_num][32] |= 0x04;
+							}
+							if(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+								find_files[find_num][32] |= 0x10;
+							}
+							if(find.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) {
+								find_files[find_num][32] |= 0x20;
+							}
 #endif
-								find_num++;
+							if(++find_num >= MAX_FIND_FILES) {
+								break;
 							}
 						}
 					}
@@ -739,19 +720,27 @@ void cpm_bdos()
 		break;
 	case 0x13:
 		// delete file
+		A = 0xff;
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-				cpm_close_file(path);
-				sprintf(string, "DEL /Q %s >NUL 2>&1", path);
-				if(system(string) == 0) {
-					A = 0;
+				if((hFind = FindFirstFile(path, &find)) != INVALID_HANDLE_VALUE) {
+					do {
+						if(!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+							if(DeleteFile(find.cFileName)) {
+								A = 0; // success
+							}
+						}
+					}
+					while(FindNextFile(hFind, &find));
+					FindClose(hFind);
+				}
+				if(A == 0) {
 					return;
 				}
 			}
 		}
-		A = 0xff;
 		H = 0;
 		break;
 	case 0x14:
@@ -770,9 +759,15 @@ void cpm_bdos()
 						cpm_memcpy(dma_addr, buffer, 128);
 						record++;
 						cpm_set_current_record(DE, record);
+						if(file_written[DE] == 0) {
+							cpm_close_file(path);
+						}
 						A = 0;
 						return;
 					}
+				}
+				if(file_written[DE] == 0) {
+					cpm_close_file(path);
 				}
 			}
 		}
@@ -811,8 +806,13 @@ void cpm_bdos()
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-				cpm_close_file(path); // just in case
-				if((fd = cpm_create_file(path)) != -1) {
+				if(RM8(DE + 12) == 0) {
+					cpm_close_file(path); // just in case
+					fd = cpm_create_file(path);
+				} else {
+					fd = cpm_open_file(path);
+				}
+				if(fd != -1) {
 #ifdef _MSX
 					msx_set_file_size(DE, 0);
 					msx_set_cur_time(DE);
@@ -825,6 +825,7 @@ void cpm_bdos()
 #endif
 					cpm_set_current_record(DE, 0);
 					cpm_set_record_count(DE, 128);
+					cpm_close_file(path); // ???
 					A = 0;
 					return;
 				}
@@ -937,9 +938,15 @@ void cpm_bdos()
 						}
 						cpm_memcpy(dma_addr, buffer, 128);
 						cpm_set_current_record(DE, record);
+						if(file_written[DE] == 0) {
+							cpm_close_file(path);
+						}
 						A = 0;
 						return;
 					}
+				}
+				if(file_written[DE] == 0) {
+					cpm_close_file(path);
 				}
 			}
 		}
@@ -1080,6 +1087,9 @@ void cpm_bdos()
 						}
 					}
 					msx_set_random_record(DE, record + count);
+					if(file_written[DE] == 0) {
+						cpm_close_file(path);
+					}
 					if(count < HL) {
 						A = 1;
 					} else {
@@ -1087,6 +1097,9 @@ void cpm_bdos()
 					}
 					HL = count;
 					return;
+				}
+				if(file_written[DE] == 0) {
+					cpm_close_file(path);
 				}
 			}
 		}
@@ -1513,6 +1526,48 @@ void cpm_create_path(int drive, const uint8* src, char* dest)
 	} else {
 		sprintf(dest, "%s.%s", file, ext);
 	}
+}
+
+bool cpm_set_file_name(const char* path, uint8* dest)
+{
+	char tmp[MAX_PATH];
+	char *name = NULL;
+	char *ext = NULL;
+	
+	memset(dest, 0x20, 11);
+	
+	if(GetShortPathName(path, tmp, MAX_PATH) == 0) {
+		strcpy(tmp, path);
+	}
+	if((name = strrchr(tmp, '\\')) != NULL) {
+		*name++ = '\0';
+	} else {
+		name = tmp;
+	}
+	if((ext = strrchr(name, '.')) != NULL) {
+		*ext++ = '\0';
+		if(strlen(ext) > 3) {
+			return false;
+		}
+		for(int i = 0; i < (int)strlen(ext); i++) {
+			if(ext[i] >= 'a' && ext[i] <= 'z') {
+				dest[i + 8] = ext[i] - 'a' + 'A';
+			} else {
+				dest[i + 8] = ext[i];
+			}
+		}
+	}
+	if(strlen(name) > 8) {
+		return false;
+	}
+	for(int i = 0; i < (int)strlen(name); i++) {
+		if(name[i] >= 'a' && name[i] <= 'z') {
+			dest[i] = name[i] - 'a' + 'A';
+		} else {
+			dest[i] = name[i];
+		}
+	}
+	return true;
 }
 
 int cpm_open_file(const char* path)

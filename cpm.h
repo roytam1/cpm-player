@@ -127,6 +127,7 @@ void cpm_memcpy(void *dst, uint16 src, size_t n);
 const uint8* cpm_get_mem_array(uint16 addr);
 
 void cpm_create_path(int drive, const uint8* src, char* dest);
+bool cpm_set_file_name(const char* path, uint8* dest);
 int cpm_open_file(const char* path);
 int cpm_create_file(const char* path);
 int cpm_get_file_desc(const char* path);
