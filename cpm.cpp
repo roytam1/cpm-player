@@ -17,6 +17,49 @@
 #include <mbctype.h>
 #include "cpm.h"
 
+#ifdef _MSX
+uint32 get_crc32(uint8 data[], int size)
+{
+	static bool initialized = false;
+	static uint32 table[256];
+	
+	if(!initialized) {
+		for(int i = 0; i < 256; i++) {
+			uint32 c = i;
+			for(int j = 0; j < 8; j++) {
+				if(c & 1) {
+					c = (c >> 1) ^ 0xedb88320;
+				} else {
+					c >>= 1;
+				}
+			}
+			table[i] = c;
+		}
+		initialized = true;
+	}
+	
+	uint32 c = ~0;
+	for(int i = 0; i < size; i++) {
+		c = table[(c ^ data[i]) & 0xff] ^ (c >> 8);
+	}
+	return ~c;
+}
+
+BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
+{
+	if(dwCtrlType == CTRL_BREAK_EVENT || dwCtrlType == CTRL_C_EVENT) {
+		uint8 buffer[0xff00];
+		cpm_memcpy(buffer, 0x100, prog_length);
+		uint32 crc32 = get_crc32(buffer, prog_length);
+		if(crc32 != prog_crc32) {
+			halt = true;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+#endif
+
 void main(int argc, char *argv[])
 {
 	if(argc < 2) {
@@ -76,10 +119,17 @@ void main(int argc, char *argv[])
 		return;
 	}
 	uint8 buffer[0xff00];
-	memset(buffer, 0, sizeof(buffer));
-	fread(buffer, 0xff00, 1, fp);
-	cpm_memcpy(0x100, buffer, 0xff00);
+	prog_length = fread(buffer, 1, 0xff00, fp);
+	cpm_memcpy(0x100, buffer, prog_length);
 	fclose(fp);
+	
+#ifdef _MSX
+	// hook ctrl-c
+	if(stricmp(argv[1], "COMMAND") == 0 || stricmp(argv[1], "COMMAND.COM") == 0) {
+		prog_crc32 = get_crc32(buffer, prog_length);
+		SetConsoleCtrlHandler(ctrl_handler, TRUE);
+	}
+#endif
 	
 	// init CP/M
 	user_id = default_drive = 0;
@@ -210,6 +260,38 @@ void main(int argc, char *argv[])
 	WM8 (0x0024, 0xc9);	// ENASLT
 	WM8 (0x0030, 0xc9);	// CALLF
 	
+	WM8 (0xf197 +  0, 0);	// DPB #1
+	WM8 (0xf197 +  1, 0xf9);
+	WM16(0xf197 +  2, 512);
+	WM8 (0xf197 +  4, 15);
+	WM8 (0xf197 +  5, 4);
+	WM8 (0xf197 +  6, 1);
+	WM8 (0xf197 +  7, 2);
+	WM16(0xf197 +  8, 1);
+	WM8 (0xf197 + 10, 2);
+	WM8 (0xf197 + 11, 112);
+	WM16(0xf197 + 12, 14);
+	WM16(0xf197 + 14, 714);
+	WM8 (0xf197 + 16, 3);
+	WM16(0xf197 + 17, 7);
+	WM16(0xf197 + 19, 0x0000);
+	
+	WM8 (0xf1ac +  0, 1);	// DPB #2
+	WM8 (0xf1ac +  1, 0xf9);
+	WM16(0xf1ac +  2, 512);
+	WM8 (0xf1ac +  4, 15);
+	WM8 (0xf1ac +  5, 4);
+	WM8 (0xf1ac +  6, 1);
+	WM8 (0xf1ac +  7, 2);
+	WM16(0xf1ac +  8, 1);
+	WM8 (0xf1ac + 10, 2);
+	WM8 (0xf1ac + 11, 112);
+	WM16(0xf1ac + 12, 14);
+	WM16(0xf1ac + 14, 714);
+	WM8 (0xf1ac + 16, 3);
+	WM16(0xf1ac + 17, 7);
+	WM16(0xf1ac + 19, 0x0000);
+	
 	WM8 (0xf27c, 0xc9);	// HL=DE*BC
 	WM8 (0xf27f, 0xc9);	// BC=BC/DE, HL=rest
 	
@@ -223,6 +305,9 @@ void main(int argc, char *argv[])
 	WM8 (0xf322, 0xc9);	// dummy routine for BREAKV
 	WM16(0xf323, 0xf320);	// DISKVE
 	WM16(0xf325, 0xf322);	// BREAKV
+	
+	WM16(0xf355, 0xf197);	// DPB #1
+	WM16(0xf357, 0xf1ac);	// DPB #2
 	
 	WM8 (0xf341, 3);	// RAMAD0
 	WM8 (0xf342, 3);	// RAMAD1
@@ -349,8 +434,6 @@ void main(int argc, char *argv[])
 	}
 	
 	// run z80
-	PCD = 0x100;
-	SPD = CPP_BASE - 2;
 	AFD = BCD = DED = HLD = 0;
 	IXD = IYD = 0xffff;	/* IX and IY are FFFF after a reset! */
 	F = ZF;			/* Zero flag is set */
@@ -359,12 +442,14 @@ void main(int argc, char *argv[])
 	af2.d = bc2.d = de2.d = hl2.d = 0;
 	ea = 0;
 	
+REBOOT:
 	im = iff1 = iff2 = 0;
 	halt = false;
 	after_ei = after_ldair = false;
 	
-	WM8(SP + 0, CPP_BASE & 0xff);
-	WM8(SP + 1, CPP_BASE >> 8);
+	PCD = 0x100;
+	SPD = CPP_BASE - 2;
+	WM16(SP, CPP_BASE);
 	
 	while(!halt) {
 		after_ei = after_ldair = false;
@@ -380,6 +465,12 @@ void main(int argc, char *argv[])
 #endif
 		}
 	}
+#ifdef _MSX
+	if(stricmp(argv[1], "COMMAND") == 0 || stricmp(argv[1], "COMMAND.COM") == 0) {
+		cpm_memcpy(0x100, buffer, prog_length);
+		goto REBOOT;
+	}
+#endif
 	
 	// finish console
 	cons_finish();
@@ -390,6 +481,12 @@ void main(int argc, char *argv[])
 			_close(file_info[i].fd);
 		}
 	}
+	
+#ifdef _MSX
+	if(stricmp(argv[1], "COMMAND") == 0 || stricmp(argv[1], "COMMAND.COM") == 0) {
+		SetConsoleCtrlHandler(ctrl_handler, FALSE);
+	}
+#endif
 }
 
 /* ----------------------------------------------------------------------------
@@ -398,9 +495,6 @@ void main(int argc, char *argv[])
 
 void cpm_bios(int num)
 {
-
-//printf("BIOS %x\n", num);
-
 	switch(num)
 	{
 	case 0x00:
@@ -806,16 +900,16 @@ void cpm_bdos()
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
-				if(RM8(DE + 12) == 0) {
+//				if(RM8(DE + 12) == 0) {
 					cpm_close_file(path); // just in case
 					fd = cpm_create_file(path);
-				} else {
-					fd = cpm_open_file(path);
-				}
+//				} else {
+//					fd = cpm_open_file(path);
+//				}
 				if(fd != -1) {
 #ifdef _MSX
-					msx_set_file_size(DE, 0);
-					msx_set_cur_time(DE);
+					msx_set_file_size(DE, _filelength(fd));
+					msx_set_file_time(DE, path);
 					file_written[DE] = 0;
 					WM8 (DE + 24, 0x40);
 					WM8 (DE + 25, 0);
@@ -875,10 +969,11 @@ void cpm_bdos()
 		break;
 #ifdef _MSX
 	case 0x1b:
-		A = 9;
+		A = 2;
 		BC = 512;
-		DE = HL = 160;
-		IX = IY = 0;
+		DE = HL = 713;
+		IX = (E == 2) ? 0xf1ac : 0xf197;
+		IY = 0x0000;
 		break;
 #else
 	case 0x1b:
@@ -1195,7 +1290,6 @@ void cpm_bdos()
 #ifdef _MSX
 void msx_main(uint16 addr)
 {
-//printf("MAIN %x\n", addr);
 	char string[512];
 	int len;
 	uint8 slt;
@@ -1405,8 +1499,6 @@ PINLIN:
 
 void msx_sub(uint16 addr)
 {
-//printf("SUB %x\n", addr);
-
 	switch(addr) {
 	case 0x0089: // GRPPRT
 		cons_putch(A);
@@ -1925,28 +2017,115 @@ void update_rtc_time()
 	Console
 ---------------------------------------------------------------------------- */
 
-#define CONS_CLEAR_BUFFER() { \
-	for(int y = 0; y < SCR_BUF_SIZE; y++) { \
-		for(int x = 0; x < 80; x++) { \
-			scr_nul[y][x].Char.AsciiChar = ' '; \
-			scr_nul[y][x].Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; \
-		} \
-	} \
+#define SET_RECT(rect, l, t, r, b) { \
+	rect.Left = l; \
+	rect.Top = t; \
+	rect.Right = r; \
+	rect.Bottom = b; \
 }
+
+#ifdef _MSX
+HWND get_console_window_handle()
+{
+	static HWND hwndFound = 0;
+	
+	if(hwndFound == 0) {
+		// https://support.microsoft.com/en-us/help/124103/how-to-obtain-a-console-window-handle-hwnd
+		char pszNewWindowTitle[1024];
+		char pszOldWindowTitle[1024];
+		
+		GetConsoleTitle(pszOldWindowTitle, 1024);
+		wsprintf(pszNewWindowTitle, "%d/%d", GetTickCount(), GetCurrentProcessId());
+		SetConsoleTitle(pszNewWindowTitle);
+		Sleep(100);
+		hwndFound = FindWindow(NULL, pszNewWindowTitle);
+		SetConsoleTitle(pszOldWindowTitle);
+	}
+	return hwndFound;
+}
+#endif
 
 void cons_init()
 {
 	GetCPInfo(_getmbcp(), &cpinfo);
 	
-	hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
 	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	
+	hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
 	GetConsoleScreenBufferInfo(hStdout, &csbi);
 	wPrevAttributes = csbi.wAttributes;
 	
-	CONS_CLEAR_BUFFER()
+	for(int y = 0; y < SCR_BUF_SIZE; y++) {
+		for(int x = 0; x < 80; x++) {
+			scr_nul[y][x].Char.AsciiChar = ' ';
+			scr_nul[y][x].Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+		}
+	}
 	scr_buf_size.X = 80;
 	scr_buf_size.Y = SCR_BUF_SIZE;
 	scr_buf_pos.X = scr_buf_pos.Y = 0;
+	
+#ifdef _MSX
+	// change window size to 80x24
+	int cur_window_width  = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+	int cur_window_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+	int cur_buffer_width  = csbi.dwSize.X;
+	int cur_buffer_height = csbi.dwSize.Y;
+	int cur_cursor_x = csbi.dwCursorPosition.X - csbi.srWindow.Left;
+	int cur_cursor_y = csbi.dwCursorPosition.Y - csbi.srWindow.Top;
+	
+	if(!(cur_buffer_width == 80 && cur_window_width == 80 && cur_window_height == 24)) {
+		SMALL_RECT rect;
+		COORD co;
+		
+		// store current screen
+		for(int y = 0; y < 24; y++) {
+			for(int x = 0; x < 80; x++) {
+				scr_buf[y][x].Char.AsciiChar = ' ';
+				scr_buf[y][x].Attributes = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+			}
+		}
+		if(cur_cursor_y > 23) {
+			SET_RECT(rect, csbi.srWindow.Left, csbi.srWindow.Top + cur_cursor_y - 23, csbi.srWindow.Left + 79, csbi.srWindow.Top + cur_cursor_y);
+		} else {
+			SET_RECT(rect, csbi.srWindow.Left, csbi.srWindow.Top, csbi.srWindow.Left + 79, csbi.srWindow.Top + 23);
+		}
+		ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		
+		system("CLS");
+		
+		// change buffer/screen size
+		if(cur_buffer_width < 80 || cur_buffer_height < 24) {
+			cur_buffer_width = max(80, cur_buffer_width);
+			cur_buffer_height = max(24, cur_buffer_height);
+			co.X = cur_buffer_width;
+			co.Y = cur_buffer_height;
+			SetConsoleScreenBufferSize(hStdout, co);
+		}
+		if(cur_window_width != 80 || cur_window_height != 24) {
+			SET_RECT(rect, 0, 0, 79, 23);
+			if(!SetConsoleWindowInfo(hStdout, TRUE, &rect)) {
+				SetWindowPos(get_console_window_handle(), NULL, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+				SetConsoleWindowInfo(hStdout, TRUE, &rect);
+			}
+		}
+		if(cur_buffer_width != 80) {
+			cur_buffer_width = 80;
+			co.X = cur_buffer_width;
+			co.Y = cur_buffer_height;
+			SetConsoleScreenBufferSize(hStdout, co);
+		}
+		
+		// restore screen
+		SET_RECT(rect, 0, 0, 79, 23);
+		WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		
+		// restor cursor
+		co.X = min(79, cur_cursor_x);
+		co.Y = min(23, cur_cursor_y);
+		SetConsoleCursorPosition(hStdout, co);
+	}
+#endif
 	
 	prev_stdin_mode = _setmode(_fileno(stdin), _O_BINARY);
 	prev_stdout_mode = _setmode(_fileno(stdout), _O_BINARY);
@@ -2037,13 +2216,6 @@ int cons_getche()
 	return(cons_getch_ex(1));
 }
 
-#define SET_RECT(rect, l, t, r, b) { \
-	rect.Left = l; \
-	rect.Top = t; \
-	rect.Right = r; \
-	rect.Bottom = b; \
-}
-
 void cons_putch(UINT8 data)
 {
 	static int p = 0;
@@ -2068,7 +2240,7 @@ void cons_putch(UINT8 data)
 	
 #ifdef _MSX
 	// hiragana to katakana
-	if(kanji_mode == 0) {
+	if(kanji_mode == 0 && !(is_kanji || is_esc)) {
 		if(data >= 0x86 && data <= 0x9f) {
 			data += 0x20;
 		} else if(data >= 0xe0 && data <= 0xfd) {
@@ -2172,7 +2344,7 @@ void cons_putch(UINT8 data)
 				}
 			} else if(tmp[1] == 'L') {
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, bottom - 2);
-				ReadConsoleOutputA(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, bottom - 1);
 				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
@@ -2183,7 +2355,7 @@ void cons_putch(UINT8 data)
 				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 			} else if(tmp[1] == 'M') {
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, bottom - 1);
-				ReadConsoleOutputA(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, bottom - 2);
 				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, bottom, csbi.dwSize.X - 1, bottom - 1);
@@ -2288,10 +2460,9 @@ void cons_putch(UINT8 data)
 					}
 				} else if(data == 'L') {
 					SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-					ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+					ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 					SET_RECT(rect, 0, co.Y + param[0], csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
-					CONS_CLEAR_BUFFER()
+					WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 					SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y + param[0] - 1);
 					WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					co.X = 0;
@@ -2301,10 +2472,9 @@ void cons_putch(UINT8 data)
 						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 					} else {
 						SET_RECT(rect, 0, co.Y + param[0], csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+						ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 						SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-						WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
-						CONS_CLEAR_BUFFER()
+						WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 					}
 					co.X = 0;
 				} else if(data == 'h') {
@@ -2408,19 +2578,17 @@ void cons_putch(UINT8 data)
 				}
 			} else if(tmp[1] == 'L') {
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 2);
-				ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
-				CONS_CLEAR_BUFFER()
+				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
 				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				co.X = 0;
 			} else if(tmp[1] == 'M') {
 				SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
-				ReadConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+				ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 2);
-				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
-				CONS_CLEAR_BUFFER()
+				WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
 				SET_RECT(rect, 0, csbi.dwSize.Y - 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
 				WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
 				co.X = 0;
@@ -2483,6 +2651,87 @@ void cons_putch(UINT8 data)
 				SetConsoleTextAttribute(hStdout, wAttributes);
 			}
 		}
+#ifdef _MSX
+	} else if(data == 0x05) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X;
+		co.Y = csbi.dwCursorPosition.Y;
+		SET_RECT(rect, co.X, co.Y, csbi.dwSize.X - 1, co.Y);
+		WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+		p = 0;
+	} else if(data == 0x06) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X;
+		co.Y = csbi.dwCursorPosition.Y;
+		SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, co.Y);
+		ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		for(int i = co.X; i < csbi.dwSize.X; i++) {
+			if(scr_buf[0][i].Char.AsciiChar == 0x20) {
+				for(int j = i + 1; j < csbi.dwSize.X; j++) {
+					if(scr_buf[0][j].Char.AsciiChar != 0x20) {
+						co.X = j;
+						SetConsoleCursorPosition(hStdout, co);
+						break;
+					}
+				}
+				break;
+			}
+		}
+		p = 0;
+	} else if(data == 0x0b) {
+		co.X = co.Y = 0;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x0c) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
+		WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+		co.X = co.Y = 0;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x0e) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwSize.X - 1;
+		co.Y = csbi.dwCursorPosition.Y;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x15) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.Y = csbi.dwCursorPosition.Y;
+		SET_RECT(rect, 0, co.Y + 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
+		ReadConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		SET_RECT(rect, 0, co.Y, csbi.dwSize.X - 1, csbi.dwSize.Y - 2);
+		WriteConsoleOutput(hStdout, &scr_buf[0][0], scr_buf_size, scr_buf_pos, &rect);
+		SET_RECT(rect, 0, csbi.dwSize.Y - 1, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
+		WriteConsoleOutput(hStdout, &scr_nul[0][0], scr_buf_size, scr_buf_pos, &rect);
+		co.X = 0;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x1c) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X + 1;
+		co.Y = csbi.dwCursorPosition.Y;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x1d) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X - 1;
+		co.Y = csbi.dwCursorPosition.Y;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x1e) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X;
+		co.Y = csbi.dwCursorPosition.Y - 1;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+	} else if(data == 0x1f) {
+		GetConsoleScreenBufferInfo(hStdout, &csbi);
+		co.X = csbi.dwCursorPosition.X;
+		co.Y = csbi.dwCursorPosition.Y + 1;
+		SetConsoleCursorPosition(hStdout, co);
+		p = 0;
+#else
 	} else if(data == 0x1a) {
 		GetConsoleScreenBufferInfo(hStdout, &csbi);
 		SET_RECT(rect, 0, 0, csbi.dwSize.X - 1, csbi.dwSize.Y - 1);
@@ -2490,6 +2739,7 @@ void cons_putch(UINT8 data)
 		co.X = co.Y = 0;
 		SetConsoleCursorPosition(hStdout, co);
 		p = 0;
+#endif
 	} else if(data == 0x1b) {
 		is_esc = 1;
 	} else {

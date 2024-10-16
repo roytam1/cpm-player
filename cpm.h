@@ -93,7 +93,7 @@ typedef union {
 #define MAX_FIND_FILES	1024
 #define TPA_BASE	0x100
 #ifdef _MSX
-#define CPM_BIOS_END	0xf1c9
+#define CPM_BIOS_END	0xf000
 #else
 #define CPM_BIOS_END	0x10000
 #endif
@@ -103,6 +103,10 @@ typedef union {
 #define BIOS_BASE	(CPM_BIOS_END - 0x070)
 #define BIOS_BASE_2	(CPM_BIOS_END - 0x020)
 
+int prog_length;
+#ifdef _MSX
+uint32 prog_crc32;
+#endif
 uint8 user_id;
 uint8 default_drive;
 uint16 login_drive;
