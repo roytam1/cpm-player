@@ -89,33 +89,117 @@ typedef union {
 ---------------------------------------------------------------------------- */
 
 #define MAX_DRIVES	1
-#define MAX_FILES	16
+#define MAX_FILES	256
+#define MAX_FIND_FILES	1024
 #define TPA_BASE	0x100
-#define CPP_BASE	0xfd00
-#define BDOS_BASE	0xfe00
-#define BDOS_BASE_2	0xfe80
-#define BIOS_BASE	0xff00
-#define BIOS_BASE_2	0xff80
+#ifdef _MSX
+#define CPM_BIOS_END	0xf000
+#else
+#define CPM_BIOS_END	0x10000
+#endif
+#define CPP_BASE	(CPM_BIOS_END - 0x200)
+#define BDOS_BASE	(CPM_BIOS_END - 0x100)
+#define BDOS_BASE_2	(CPM_BIOS_END - 0x080)
+#define BIOS_BASE	(CPM_BIOS_END - 0x070)
+#define BIOS_BASE_2	(CPM_BIOS_END - 0x020)
 
-uint8 mem[0x10000];
+int prog_length;
+#ifdef _MSX
+uint32 prog_crc32;
+#endif
 uint8 user_id;
 uint8 default_drive;
 uint16 login_drive;
 uint8 delimiter;
+uint8 verify;
 uint8 read_only[16];
 uint16 dma_addr;
-uint8 find_files[256][12];
+uint8 find_files[MAX_FIND_FILES][33];
 int find_num, find_idx;
-FILE *file_ptr[MAX_FILES];
-char file_path[MAX_FILES][256];
+struct {
+	int fd;
+	char path[MAX_PATH];
+} file_info[MAX_FILES];
+uint8 file_written[0x10000] = {0};
 
 void cpm_bios(int num);
 void cpm_bdos();
 
-void cpm_create_path(int drive, uint8* src, char* dest);
-FILE* cpm_get_file_ptr(char* path);
-void cpm_close_file(char* path);
-int cpm_get_file_size(char* path);
+void cpm_memset(uint16 addr, int c, size_t n);
+void cpm_memcpy(uint16 dst, const void *src, size_t n);
+void cpm_memcpy(void *dst, uint16 src, size_t n);
+const uint8* cpm_get_mem_array(uint16 addr);
+
+void cpm_create_path(int drive, const uint8* src, char* dest);
+bool cpm_set_file_name(const char* path, uint8* dest);
+int cpm_open_file(const char* path);
+int cpm_create_file(const char* path);
+int cpm_get_file_desc(const char* path);
+void cpm_close_file(const char* path);
+int cpm_get_file_size(const char* path);
+
+int cpm_get_drive(uint16 fcb);
+int cpm_get_current_extent(uint16 fcb);
+void cpm_set_alloc_vector(uint16 fcb, int block);
+uint32 cpm_get_current_record(uint16 fcb);
+void cpm_set_current_record(uint16 fcb, uint32 record);
+uint32 cpm_get_random_record(uint16 fcb);
+void cpm_set_random_record(uint16 fcb, uint32 record);
+void cpm_set_record_count(uint16 fcb, uint8 count);
+
+#ifdef _MSX
+void msx_main(uint16 addr);
+void msx_sub(uint16 addr);
+void msx_set_file_size(uint16 fcb, int size);
+int msx_get_file_size(uint16 fcb);
+void msx_set_file_time(uint16 fcb, const char *path);
+void msx_set_cur_time(uint16 fcb);
+uint16 msx_get_record_size(uint16 fcb);
+uint32 msx_get_random_record(uint16 fcb);
+void msx_set_random_record(uint16 fcb, uint32 record);
+bool check_leap_year(int year);
+bool check_date(int year, int month, int day);
+bool check_time(int hour, int minute, int second);
+uint16 jis_to_sjis(uint16 code);
+uint8 kanji_mode;
+#endif
+
+/* ----------------------------------------------------------------------------
+	Memory, I/O
+---------------------------------------------------------------------------- */
+
+#ifdef _MSX
+uint8 mem[0x400000];
+uint8 bios[0x8000];
+uint8 sub[0x4000];
+uint8 disk[0x4000];
+uint8 rd_dummy[0x4000];
+uint8 wr_dummy[0x4000];
+uint8 *rd_bank[4][4];
+uint8 *wr_bank[4][4];
+uint8 slot[4];
+uint8 mapper[4];
+void set_mapper(int page, int seg);
+uint8 get_mapper(int page);
+
+uint8 rtc_addr;
+uint8 rtc_regs[16];
+uint8 rtc_time[13];
+uint8 rtc_ram[26];
+int rtc_year;
+DWORD rtc_prev_time;
+void reset_rtc();
+void set_rtc_addr(uint8 val);
+uint8 get_rtc_addr();
+void set_rtc_data(uint8 val);
+uint8 get_rtc_data();
+void update_rtc_time();
+
+uint8 kanji1_hi, kanji1_lo, kanji1_idx;
+uint8 kanji2_hi, kanji2_lo, kanji2_idx;
+#else
+uint8 mem[0x10000];
+#endif
 
 /* ----------------------------------------------------------------------------
 	Console
@@ -125,6 +209,7 @@ int cpm_get_file_size(char* path);
 
 CPINFO cpinfo;
 HANDLE hStdout;
+CHAR_INFO scr_nul[SCR_BUF_SIZE][80];
 CHAR_INFO scr_buf[SCR_BUF_SIZE][80];
 COORD scr_buf_size;
 COORD scr_buf_pos;
@@ -137,6 +222,7 @@ int cons_kbhit();
 int cons_getch();
 int cons_getche();
 void cons_putch(UINT8 data);
+void cons_cursor(int x, int y);
 
 /* ----------------------------------------------------------------------------
 	Z80 (MAME 0.145)
@@ -230,8 +316,14 @@ bool after_ei, after_ldair;
 
 inline uint8 RM8(uint32 addr);
 inline void WM8(uint32 addr, uint8 val);
-inline void RM16(uint32 addr, pair *r);
-inline void WM16(uint32 addr, pair *r);
+inline uint32 RM16(uint32 addr);
+inline void WM16(uint32 addr, uint32 val);
+inline uint32 RM24(uint32 addr);
+inline void WM24(uint32 addr, uint32 val);
+inline uint32 RM32(uint32 addr);
+inline void WM32(uint32 addr, uint32 val);
+inline void RM16p(uint32 addr, pair *r);
+inline void WM16p(uint32 addr, pair *r);
 inline uint8 FETCHOP();
 inline uint8 FETCH8();
 inline uint32 FETCH16();
