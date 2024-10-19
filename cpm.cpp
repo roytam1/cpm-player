@@ -48,6 +48,7 @@ uint32 get_crc32(uint8 data[], int size)
 BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 {
 	if(dwCtrlType == CTRL_BREAK_EVENT || dwCtrlType == CTRL_C_EVENT) {
+		// check if COMMAND.COM is running
 		uint8 buffer[0xff00];
 		cpm_memcpy(buffer, 0x100, prog_length);
 		uint32 crc32 = get_crc32(buffer, prog_length);
@@ -55,6 +56,17 @@ BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 			halt = true;
 			return TRUE;
 		}
+		
+		// finish console
+		cons_finish();
+		
+		// close opened file
+		for(int i = 0; i < MAX_FILES; i++) {
+			if(file_info[i].fd != -1) {
+				_close(file_info[i].fd);
+			}
+		}
+		SetConsoleCtrlHandler(ctrl_handler, FALSE);
 	}
 	return FALSE;
 }
@@ -124,7 +136,7 @@ void main(int argc, char *argv[])
 	fclose(fp);
 	
 #ifdef _MSX
-	// hook ctrl-c
+	// hook Ctrl-Break and Ctrl-C
 	if(stricmp(argv[1], "COMMAND") == 0 || stricmp(argv[1], "COMMAND.COM") == 0) {
 		prog_crc32 = get_crc32(buffer, prog_length);
 		SetConsoleCtrlHandler(ctrl_handler, TRUE);
