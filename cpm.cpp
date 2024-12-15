@@ -17,6 +17,11 @@
 #include <mbctype.h>
 #include "cpm.h"
 
+//#define DEBUG_LOG
+#ifdef DEBUG_LOG
+void debug();
+#endif
+
 #ifdef _MSX
 uint32 get_crc32(uint8 data[], int size)
 {
@@ -465,12 +470,18 @@ REBOOT:
 	
 	while(!halt) {
 		after_ei = after_ldair = false;
+#ifdef DEBUG_LOG
+		debug();
+#endif
 		OP(FETCHOP());
 #if HAS_LDAIR_QUIRK
 		if(after_ldair) F &= ~PF;	// reset parity flag after LD A,I or LD A,R
 #endif
 		if(after_ei) {
 			after_ldair = false;
+#ifdef DEBUG_LOG
+			debug();
+#endif
 			OP(FETCHOP());
 #if HAS_LDAIR_QUIRK
 			if(after_ldair) F &= ~PF;	// reset parity flag after LD A,I or LD A,R
@@ -507,6 +518,9 @@ REBOOT:
 
 void cpm_bios(int num)
 {
+#ifdef DEBUG_LOG
+	fprintf(stderr, "BIOS %02Xh\n", num);
+#endif
 	switch(num)
 	{
 	case 0x00:
@@ -547,6 +561,9 @@ void cpm_bios(int num)
 
 void cpm_bdos()
 {
+#ifdef DEBUG_LOG
+	fprintf(stderr, "BDOS %02Xh\n", C);
+#endif
 	char string[512];
 	char path[MAX_PATH], dest[MAX_PATH];
 	uint8 name[11];
@@ -644,6 +661,11 @@ void cpm_bdos()
 	case 0x0b:
 		// console status
 		A = cons_kbhit() ? 0xff : 0;
+		if(A) {
+			F &= ~ZF;
+		} else {
+			F |= ZF;
+		}
 		Sleep(0);
 		break;
 	case 0x0c:
@@ -1302,6 +1324,9 @@ void cpm_bdos()
 #ifdef _MSX
 void msx_main(uint16 addr)
 {
+#ifdef DEBUG_LOG
+	fprintf(stderr, "MAIN %04Xh\n", addr);
+#endif
 	char string[512];
 	int len;
 	uint8 slt;
@@ -1511,6 +1536,9 @@ PINLIN:
 
 void msx_sub(uint16 addr)
 {
+#ifdef DEBUG_LOG
+	fprintf(stderr, "SUB %04Xh\n", addr);
+#endif
 	switch(addr) {
 	case 0x0089: // GRPPRT
 		cons_putch(A);
@@ -1625,7 +1653,7 @@ void cpm_create_path(int drive, const uint8* src, char* dest)
 		ext[i] = (src[i + 8] == 0x20) ? '\0' : src[i + 8];
 	}
 	ext[3] = '\0';
-	if(drive) {
+	if(drive > 1) {
 		sprintf(dest, "%c\\%s.%s", 'A' + drive, file, ext);
 	} else {
 		sprintf(dest, "%s.%s", file, ext);
@@ -3807,7 +3835,9 @@ void OP_CB(uint8 code)
 	case 0xfd: L = SET(7, L); break;		/* SET  7,L         */
 	case 0xfe: WM8(HL, SET(7, RM8(HL))); break;	/* SET  7,(HL)      */
 	case 0xff: A = SET(7, A); break;		/* SET  7,A         */
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
 	default: __assume(0);
+#endif
 	}
 }
 
@@ -4071,7 +4101,9 @@ void OP_XY(uint8 code)
 	case 0xfd: L = SET(7, RM8(ea)); WM8(ea, L); break;	/* SET  7,L=(XY+o)  */
 	case 0xfe: WM8(ea, SET(7, RM8(ea))); break;		/* SET  7,(XY+o)    */
 	case 0xff: A = SET(7, RM8(ea)); WM8(ea, A); break;	/* SET  7,A=(XY+o)  */
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
 	default: __assume(0);
+#endif
 	}
 }
 
@@ -4638,7 +4670,1425 @@ void OP(uint8 code)
 	case 0xfd: OP_FD(FETCHOP()); break;										/* **** FD xx       */
 	case 0xfe: CP(FETCH8()); break;											/* CP   n           */
 	case 0xff: RST(0x38); break;											/* RST  7           */
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
 	default: __assume(0);
+#endif
 	}
 }
 
+#ifdef DEBUG_LOG
+// disassembler
+void dasm_cb(uint32 pc, char *buffer);
+void dasm_dd(uint32 pc, char *buffer);
+void dasm_ed(uint32 pc, char *buffer);
+void dasm_fd(uint32 pc, char *buffer);
+void dasm_ddcb(uint32 pc, char *buffer);
+void dasm_fdcb(uint32 pc, char *buffer);
+
+uint8 z80_dasm_ops[8];
+int z80_dasm_ptr;
+
+inline uint8 dasm_fetchop()
+{
+	return z80_dasm_ops[z80_dasm_ptr++];
+}
+
+inline uint8 debug_fetch8()
+{
+	return z80_dasm_ops[z80_dasm_ptr++];
+}
+
+inline uint16 debug_fetch16()
+{
+	uint16 val = z80_dasm_ops[z80_dasm_ptr] | (z80_dasm_ops[z80_dasm_ptr + 1] << 8);
+	z80_dasm_ptr += 2;
+	return val;
+}
+
+inline int8 debug_fetch8_rel()
+{
+	return (int8)z80_dasm_ops[z80_dasm_ptr++];
+}
+
+inline uint16 debug_fetch8_relpc(uint32 pc)
+{
+	int8 res = (int8)z80_dasm_ops[z80_dasm_ptr++];
+	return pc + z80_dasm_ptr + res;
+}
+
+int dasm(uint32 pc, char *buffer)
+{
+	buffer[0] = '\0';
+	for(int i = 0; i < 8; i++) {
+		z80_dasm_ops[i] = RM8(pc + i);
+	}
+	z80_dasm_ptr = 0;
+	uint8 code = dasm_fetchop();
+	
+	switch(code) {
+	case 0x00: sprintf(buffer, "NOP"); break;
+	case 0x01: sprintf(buffer, "LD BC, %04x", debug_fetch16()); break;
+	case 0x02: sprintf(buffer, "LD (BC), A"); break;
+	case 0x03: sprintf(buffer, "INC BC"); break;
+	case 0x04: sprintf(buffer, "INC B"); break;
+	case 0x05: sprintf(buffer, "DEC B"); break;
+	case 0x06: sprintf(buffer, "LD B, %02x", debug_fetch8()); break;
+	case 0x07: sprintf(buffer, "RLCA"); break;
+	case 0x08: sprintf(buffer, "EX AF, AF'"); break;
+	case 0x09: sprintf(buffer, "ADD HL, BC"); break;
+	case 0x0a: sprintf(buffer, "LD A, (BC)"); break;
+	case 0x0b: sprintf(buffer, "DEC BC"); break;
+	case 0x0c: sprintf(buffer, "INC C"); break;
+	case 0x0d: sprintf(buffer, "DEC C"); break;
+	case 0x0e: sprintf(buffer, "LD C, %02x", debug_fetch8()); break;
+	case 0x0f: sprintf(buffer, "RRCA"); break;
+	case 0x10: sprintf(buffer, "DJNZ %04x", debug_fetch8_relpc(pc)); break;
+	case 0x11: sprintf(buffer, "LD DE, %04x", debug_fetch16()); break;
+	case 0x12: sprintf(buffer, "LD (DE), A"); break;
+	case 0x13: sprintf(buffer, "INC DE"); break;
+	case 0x14: sprintf(buffer, "INC D"); break;
+	case 0x15: sprintf(buffer, "DEC D"); break;
+	case 0x16: sprintf(buffer, "LD D, %02x", debug_fetch8()); break;
+	case 0x17: sprintf(buffer, "RLA"); break;
+	case 0x18: sprintf(buffer, "JR %04x", debug_fetch8_relpc(pc)); break;
+	case 0x19: sprintf(buffer, "ADD HL, DE"); break;
+	case 0x1a: sprintf(buffer, "LD A, (DE)"); break;
+	case 0x1b: sprintf(buffer, "DEC DE"); break;
+	case 0x1c: sprintf(buffer, "INC E"); break;
+	case 0x1d: sprintf(buffer, "DEC E"); break;
+	case 0x1e: sprintf(buffer, "LD E, %02x", debug_fetch8()); break;
+	case 0x1f: sprintf(buffer, "RRA"); break;
+	case 0x20: sprintf(buffer, "JR NZ, %04x", debug_fetch8_relpc(pc)); break;
+	case 0x21: sprintf(buffer, "LD HL, %04x", debug_fetch16()); break;
+	case 0x22: sprintf(buffer, "LD (%04x), HL", debug_fetch16()); break;
+	case 0x23: sprintf(buffer, "INC HL"); break;
+	case 0x24: sprintf(buffer, "INC H"); break;
+	case 0x25: sprintf(buffer, "DEC H"); break;
+	case 0x26: sprintf(buffer, "LD H, %02x", debug_fetch8()); break;
+	case 0x27: sprintf(buffer, "DAA"); break;
+	case 0x28: sprintf(buffer, "JR Z, %04x", debug_fetch8_relpc(pc)); break;
+	case 0x29: sprintf(buffer, "ADD HL, HL"); break;
+	case 0x2a: sprintf(buffer, "LD HL, (%04x)", debug_fetch16()); break;
+	case 0x2b: sprintf(buffer, "DEC HL"); break;
+	case 0x2c: sprintf(buffer, "INC L"); break;
+	case 0x2d: sprintf(buffer, "DEC L"); break;
+	case 0x2e: sprintf(buffer, "LD L, %02x", debug_fetch8()); break;
+	case 0x2f: sprintf(buffer, "CPL"); break;
+	case 0x30: sprintf(buffer, "JR NC, %04x", debug_fetch8_relpc(pc)); break;
+	case 0x31: sprintf(buffer, "LD SP, %04x", debug_fetch16()); break;
+	case 0x32: sprintf(buffer, "LD (%04x), A", debug_fetch16()); break;
+	case 0x33: sprintf(buffer, "INC SP"); break;
+	case 0x34: sprintf(buffer, "INC (HL)"); break;
+	case 0x35: sprintf(buffer, "DEC (HL)"); break;
+	case 0x36: sprintf(buffer, "LD (HL), %02x", debug_fetch8()); break;
+	case 0x37: sprintf(buffer, "SCF"); break;
+	case 0x38: sprintf(buffer, "JR C, %04x", debug_fetch8_relpc(pc)); break;
+	case 0x39: sprintf(buffer, "ADD HL, SP"); break;
+	case 0x3a: sprintf(buffer, "LD A, (%04x)", debug_fetch16()); break;
+	case 0x3b: sprintf(buffer, "DEC SP"); break;
+	case 0x3c: sprintf(buffer, "INC A"); break;
+	case 0x3d: sprintf(buffer, "DEC A"); break;
+	case 0x3e: sprintf(buffer, "LD A, %02x", debug_fetch8()); break;
+	case 0x3f: sprintf(buffer, "CCF"); break;
+	case 0x40: sprintf(buffer, "LD B, B"); break;
+	case 0x41: sprintf(buffer, "LD B, C"); break;
+	case 0x42: sprintf(buffer, "LD B, D"); break;
+	case 0x43: sprintf(buffer, "LD B, E"); break;
+	case 0x44: sprintf(buffer, "LD B, H"); break;
+	case 0x45: sprintf(buffer, "LD B, L"); break;
+	case 0x46: sprintf(buffer, "LD B, (HL)"); break;
+	case 0x47: sprintf(buffer, "LD B, A"); break;
+	case 0x48: sprintf(buffer, "LD C, B"); break;
+	case 0x49: sprintf(buffer, "LD C, C"); break;
+	case 0x4a: sprintf(buffer, "LD C, D"); break;
+	case 0x4b: sprintf(buffer, "LD C, E"); break;
+	case 0x4c: sprintf(buffer, "LD C, H"); break;
+	case 0x4d: sprintf(buffer, "LD C, L"); break;
+	case 0x4e: sprintf(buffer, "LD C, (HL)"); break;
+	case 0x4f: sprintf(buffer, "LD C, A"); break;
+	case 0x50: sprintf(buffer, "LD D, B"); break;
+	case 0x51: sprintf(buffer, "LD D, C"); break;
+	case 0x52: sprintf(buffer, "LD D, D"); break;
+	case 0x53: sprintf(buffer, "LD D, E"); break;
+	case 0x54: sprintf(buffer, "LD D, H"); break;
+	case 0x55: sprintf(buffer, "LD D, L"); break;
+	case 0x56: sprintf(buffer, "LD D, (HL)"); break;
+	case 0x57: sprintf(buffer, "LD D, A"); break;
+	case 0x58: sprintf(buffer, "LD E, B"); break;
+	case 0x59: sprintf(buffer, "LD E, C"); break;
+	case 0x5a: sprintf(buffer, "LD E, D"); break;
+	case 0x5b: sprintf(buffer, "LD E, E"); break;
+	case 0x5c: sprintf(buffer, "LD E, H"); break;
+	case 0x5d: sprintf(buffer, "LD E, L"); break;
+	case 0x5e: sprintf(buffer, "LD E, (HL)"); break;
+	case 0x5f: sprintf(buffer, "LD E, A"); break;
+	case 0x60: sprintf(buffer, "LD H, B"); break;
+	case 0x61: sprintf(buffer, "LD H, C"); break;
+	case 0x62: sprintf(buffer, "LD H, D"); break;
+	case 0x63: sprintf(buffer, "LD H, E"); break;
+	case 0x64: sprintf(buffer, "LD H, H"); break;
+	case 0x65: sprintf(buffer, "LD H, L"); break;
+	case 0x66: sprintf(buffer, "LD H, (HL)"); break;
+	case 0x67: sprintf(buffer, "LD H, A"); break;
+	case 0x68: sprintf(buffer, "LD L, B"); break;
+	case 0x69: sprintf(buffer, "LD L, C"); break;
+	case 0x6a: sprintf(buffer, "LD L, D"); break;
+	case 0x6b: sprintf(buffer, "LD L, E"); break;
+	case 0x6c: sprintf(buffer, "LD L, H"); break;
+	case 0x6d: sprintf(buffer, "LD L, L"); break;
+	case 0x6e: sprintf(buffer, "LD L, (HL)"); break;
+	case 0x6f: sprintf(buffer, "LD L, A"); break;
+	case 0x70: sprintf(buffer, "LD (HL), B"); break;
+	case 0x71: sprintf(buffer, "LD (HL), C"); break;
+	case 0x72: sprintf(buffer, "LD (HL), D"); break;
+	case 0x73: sprintf(buffer, "LD (HL), E"); break;
+	case 0x74: sprintf(buffer, "LD (HL), H"); break;
+	case 0x75: sprintf(buffer, "LD (HL), L"); break;
+	case 0x76: sprintf(buffer, "HALT"); break;
+	case 0x77: sprintf(buffer, "LD (HL), A"); break;
+	case 0x78: sprintf(buffer, "LD A, B"); break;
+	case 0x79: sprintf(buffer, "LD A, C"); break;
+	case 0x7a: sprintf(buffer, "LD A, D"); break;
+	case 0x7b: sprintf(buffer, "LD A, E"); break;
+	case 0x7c: sprintf(buffer, "LD A, H"); break;
+	case 0x7d: sprintf(buffer, "LD A, L"); break;
+	case 0x7e: sprintf(buffer, "LD A, (HL)"); break;
+	case 0x7f: sprintf(buffer, "LD A, A"); break;
+	case 0x80: sprintf(buffer, "ADD A, B"); break;
+	case 0x81: sprintf(buffer, "ADD A, C"); break;
+	case 0x82: sprintf(buffer, "ADD A, D"); break;
+	case 0x83: sprintf(buffer, "ADD A, E"); break;
+	case 0x84: sprintf(buffer, "ADD A, H"); break;
+	case 0x85: sprintf(buffer, "ADD A, L"); break;
+	case 0x86: sprintf(buffer, "ADD A, (HL)"); break;
+	case 0x87: sprintf(buffer, "ADD A, A"); break;
+	case 0x88: sprintf(buffer, "ADC A, B"); break;
+	case 0x89: sprintf(buffer, "ADC A, C"); break;
+	case 0x8a: sprintf(buffer, "ADC A, D"); break;
+	case 0x8b: sprintf(buffer, "ADC A, E"); break;
+	case 0x8c: sprintf(buffer, "ADC A, H"); break;
+	case 0x8d: sprintf(buffer, "ADC A, L"); break;
+	case 0x8e: sprintf(buffer, "ADC A, (HL)"); break;
+	case 0x8f: sprintf(buffer, "ADC A, A"); break;
+	case 0x90: sprintf(buffer, "SUB B"); break;
+	case 0x91: sprintf(buffer, "SUB C"); break;
+	case 0x92: sprintf(buffer, "SUB D"); break;
+	case 0x93: sprintf(buffer, "SUB E"); break;
+	case 0x94: sprintf(buffer, "SUB H"); break;
+	case 0x95: sprintf(buffer, "SUB L"); break;
+	case 0x96: sprintf(buffer, "SUB (HL)"); break;
+	case 0x97: sprintf(buffer, "SUB A"); break;
+	case 0x98: sprintf(buffer, "SBC A, B"); break;
+	case 0x99: sprintf(buffer, "SBC A, C"); break;
+	case 0x9a: sprintf(buffer, "SBC A, D"); break;
+	case 0x9b: sprintf(buffer, "SBC A, E"); break;
+	case 0x9c: sprintf(buffer, "SBC A, H"); break;
+	case 0x9d: sprintf(buffer, "SBC A, L"); break;
+	case 0x9e: sprintf(buffer, "SBC A, (HL)"); break;
+	case 0x9f: sprintf(buffer, "SBC A, A"); break;
+	case 0xa0: sprintf(buffer, "AND B"); break;
+	case 0xa1: sprintf(buffer, "AND C"); break;
+	case 0xa2: sprintf(buffer, "AND D"); break;
+	case 0xa3: sprintf(buffer, "AND E"); break;
+	case 0xa4: sprintf(buffer, "AND H"); break;
+	case 0xa5: sprintf(buffer, "AND L"); break;
+	case 0xa6: sprintf(buffer, "AND (HL)"); break;
+	case 0xa7: sprintf(buffer, "AND A"); break;
+	case 0xa8: sprintf(buffer, "XOR B"); break;
+	case 0xa9: sprintf(buffer, "XOR C"); break;
+	case 0xaa: sprintf(buffer, "XOR D"); break;
+	case 0xab: sprintf(buffer, "XOR E"); break;
+	case 0xac: sprintf(buffer, "XOR H"); break;
+	case 0xad: sprintf(buffer, "XOR L"); break;
+	case 0xae: sprintf(buffer, "XOR (HL)"); break;
+	case 0xaf: sprintf(buffer, "XOR A"); break;
+	case 0xb0: sprintf(buffer, "OR B"); break;
+	case 0xb1: sprintf(buffer, "OR C"); break;
+	case 0xb2: sprintf(buffer, "OR D"); break;
+	case 0xb3: sprintf(buffer, "OR E"); break;
+	case 0xb4: sprintf(buffer, "OR H"); break;
+	case 0xb5: sprintf(buffer, "OR L"); break;
+	case 0xb6: sprintf(buffer, "OR (HL)"); break;
+	case 0xb7: sprintf(buffer, "OR A"); break;
+	case 0xb8: sprintf(buffer, "CP B"); break;
+	case 0xb9: sprintf(buffer, "CP C"); break;
+	case 0xba: sprintf(buffer, "CP D"); break;
+	case 0xbb: sprintf(buffer, "CP E"); break;
+	case 0xbc: sprintf(buffer, "CP H"); break;
+	case 0xbd: sprintf(buffer, "CP L"); break;
+	case 0xbe: sprintf(buffer, "CP (HL)"); break;
+	case 0xbf: sprintf(buffer, "CP A"); break;
+	case 0xc0: sprintf(buffer, "RET NZ"); break;
+	case 0xc1: sprintf(buffer, "POP BC"); break;
+	case 0xc2: sprintf(buffer, "JP NZ, %04x", debug_fetch16()); break;
+	case 0xc3: sprintf(buffer, "JP %04x", debug_fetch16()); break;
+	case 0xc4: sprintf(buffer, "CALL NZ, %04x", debug_fetch16()); break;
+	case 0xc5: sprintf(buffer, "PUSH BC"); break;
+	case 0xc6: sprintf(buffer, "ADD A, %02x", debug_fetch8()); break;
+	case 0xc7: sprintf(buffer, "RST 00H"); break;
+	case 0xc8: sprintf(buffer, "RET Z"); break;
+	case 0xc9: sprintf(buffer, "RET"); break;
+	case 0xca: sprintf(buffer, "JP Z, %04x", debug_fetch16()); break;
+	case 0xcb: dasm_cb(pc, buffer); break;
+	case 0xcc: sprintf(buffer, "CALL Z, %04x", debug_fetch16()); break;
+	case 0xcd: sprintf(buffer, "CALL %04x", debug_fetch16()); break;
+	case 0xce: sprintf(buffer, "ADC A, %02x", debug_fetch8()); break;
+	case 0xcf: sprintf(buffer, "RST 08H"); break;
+	case 0xd0: sprintf(buffer, "RET NC"); break;
+	case 0xd1: sprintf(buffer, "POP DE"); break;
+	case 0xd2: sprintf(buffer, "JP NC, %04x", debug_fetch16()); break;
+	case 0xd3: sprintf(buffer, "OUT (%02x), A", debug_fetch8()); break;
+	case 0xd4: sprintf(buffer, "CALL NC, %04x", debug_fetch16()); break;
+	case 0xd5: sprintf(buffer, "PUSH DE"); break;
+	case 0xd6: sprintf(buffer, "SUB %02x", debug_fetch8()); break;
+	case 0xd7: sprintf(buffer, "RST 10H"); break;
+	case 0xd8: sprintf(buffer, "RET C"); break;
+	case 0xd9: sprintf(buffer, "EXX"); break;
+	case 0xda: sprintf(buffer, "JP C, %04x", debug_fetch16()); break;
+	case 0xdb: sprintf(buffer, "IN A, (%02x)", debug_fetch8()); break;
+	case 0xdc: sprintf(buffer, "CALL C, %04x", debug_fetch16()); break;
+	case 0xdd: dasm_dd(pc, buffer); break;
+	case 0xde: sprintf(buffer, "SBC A, %02x", debug_fetch8()); break;
+	case 0xdf: sprintf(buffer, "RST 18H"); break;
+	case 0xe0: sprintf(buffer, "RET PO"); break;
+	case 0xe1: sprintf(buffer, "POP HL"); break;
+	case 0xe2: sprintf(buffer, "JP PO, %04x", debug_fetch16()); break;
+	case 0xe3: sprintf(buffer, "EX HL, (SP)"); break;
+	case 0xe4: sprintf(buffer, "CALL PO, %04x", debug_fetch16()); break;
+	case 0xe5: sprintf(buffer, "PUSH HL"); break;
+	case 0xe6: sprintf(buffer, "AND %02x", debug_fetch8()); break;
+	case 0xe7: sprintf(buffer, "RST 20H"); break;
+	case 0xe8: sprintf(buffer, "RET PE"); break;
+	case 0xe9: sprintf(buffer, "JP (HL)"); break;
+	case 0xea: sprintf(buffer, "JP PE, %04x", debug_fetch16()); break;
+	case 0xeb: sprintf(buffer, "EX DE, HL"); break;
+	case 0xec: sprintf(buffer, "CALL PE, %04x", debug_fetch16()); break;
+	case 0xed: dasm_ed(pc, buffer); break;
+	case 0xee: sprintf(buffer, "XOR %02x", debug_fetch8()); break;
+	case 0xef: sprintf(buffer, "RST 28H"); break;
+	case 0xf0: sprintf(buffer, "RET P"); break;
+	case 0xf1: sprintf(buffer, "POP AF"); break;
+	case 0xf2: sprintf(buffer, "JP P, %04x", debug_fetch16()); break;
+	case 0xf3: sprintf(buffer, "DI"); break;
+	case 0xf4: sprintf(buffer, "CALL P, %04x", debug_fetch16()); break;
+	case 0xf5: sprintf(buffer, "PUSH AF"); break;
+	case 0xf6: sprintf(buffer, "OR %02x", debug_fetch8()); break;
+	case 0xf7: sprintf(buffer, "RST 30H"); break;
+	case 0xf8: sprintf(buffer, "RET M"); break;
+	case 0xf9: sprintf(buffer, "LD SP, HL"); break;
+	case 0xfa: sprintf(buffer, "JP M, %04x", debug_fetch16()); break;
+	case 0xfb: sprintf(buffer, "EI"); break;
+	case 0xfc: sprintf(buffer, "CALL M, %04x", debug_fetch16()); break;
+	case 0xfd: dasm_fd(pc, buffer); break;
+	case 0xfe: sprintf(buffer, "CP %02x", debug_fetch8()); break;
+	case 0xff: sprintf(buffer, "RST 38H"); break;
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
+	default: __assume(0);
+#endif
+	}
+	return z80_dasm_ptr;
+}
+
+void dasm_cb(uint32 pc, char *buffer)
+{
+	uint8 code = dasm_fetchop();
+	
+	switch(code) {
+	case 0x00: sprintf(buffer, "RLC B"); break;
+	case 0x01: sprintf(buffer, "RLC C"); break;
+	case 0x02: sprintf(buffer, "RLC D"); break;
+	case 0x03: sprintf(buffer, "RLC E"); break;
+	case 0x04: sprintf(buffer, "RLC H"); break;
+	case 0x05: sprintf(buffer, "RLC L"); break;
+	case 0x06: sprintf(buffer, "RLC (HL)"); break;
+	case 0x07: sprintf(buffer, "RLC A"); break;
+	case 0x08: sprintf(buffer, "RRC B"); break;
+	case 0x09: sprintf(buffer, "RRC C"); break;
+	case 0x0a: sprintf(buffer, "RRC D"); break;
+	case 0x0b: sprintf(buffer, "RRC E"); break;
+	case 0x0c: sprintf(buffer, "RRC H"); break;
+	case 0x0d: sprintf(buffer, "RRC L"); break;
+	case 0x0e: sprintf(buffer, "RRC (HL)"); break;
+	case 0x0f: sprintf(buffer, "RRC A"); break;
+	case 0x10: sprintf(buffer, "RL B"); break;
+	case 0x11: sprintf(buffer, "RL C"); break;
+	case 0x12: sprintf(buffer, "RL D"); break;
+	case 0x13: sprintf(buffer, "RL E"); break;
+	case 0x14: sprintf(buffer, "RL H"); break;
+	case 0x15: sprintf(buffer, "RL L"); break;
+	case 0x16: sprintf(buffer, "RL (HL)"); break;
+	case 0x17: sprintf(buffer, "RL A"); break;
+	case 0x18: sprintf(buffer, "RR B"); break;
+	case 0x19: sprintf(buffer, "RR C"); break;
+	case 0x1a: sprintf(buffer, "RR D"); break;
+	case 0x1b: sprintf(buffer, "RR E"); break;
+	case 0x1c: sprintf(buffer, "RR H"); break;
+	case 0x1d: sprintf(buffer, "RR L"); break;
+	case 0x1e: sprintf(buffer, "RR (HL)"); break;
+	case 0x1f: sprintf(buffer, "RR A"); break;
+	case 0x20: sprintf(buffer, "SLA B"); break;
+	case 0x21: sprintf(buffer, "SLA C"); break;
+	case 0x22: sprintf(buffer, "SLA D"); break;
+	case 0x23: sprintf(buffer, "SLA E"); break;
+	case 0x24: sprintf(buffer, "SLA H"); break;
+	case 0x25: sprintf(buffer, "SLA L"); break;
+	case 0x26: sprintf(buffer, "SLA (HL)"); break;
+	case 0x27: sprintf(buffer, "SLA A"); break;
+	case 0x28: sprintf(buffer, "SRA B"); break;
+	case 0x29: sprintf(buffer, "SRA C"); break;
+	case 0x2a: sprintf(buffer, "SRA D"); break;
+	case 0x2b: sprintf(buffer, "SRA E"); break;
+	case 0x2c: sprintf(buffer, "SRA H"); break;
+	case 0x2d: sprintf(buffer, "SRA L"); break;
+	case 0x2e: sprintf(buffer, "SRA (HL)"); break;
+	case 0x2f: sprintf(buffer, "SRA A"); break;
+	case 0x30: sprintf(buffer, "SLL B"); break;
+	case 0x31: sprintf(buffer, "SLL C"); break;
+	case 0x32: sprintf(buffer, "SLL D"); break;
+	case 0x33: sprintf(buffer, "SLL E"); break;
+	case 0x34: sprintf(buffer, "SLL H"); break;
+	case 0x35: sprintf(buffer, "SLL L"); break;
+	case 0x36: sprintf(buffer, "SLL (HL)"); break;
+	case 0x37: sprintf(buffer, "SLL A"); break;
+	case 0x38: sprintf(buffer, "SRL B"); break;
+	case 0x39: sprintf(buffer, "SRL C"); break;
+	case 0x3a: sprintf(buffer, "SRL D"); break;
+	case 0x3b: sprintf(buffer, "SRL E"); break;
+	case 0x3c: sprintf(buffer, "SRL H"); break;
+	case 0x3d: sprintf(buffer, "SRL L"); break;
+	case 0x3e: sprintf(buffer, "SRL (HL)"); break;
+	case 0x3f: sprintf(buffer, "SRL A"); break;
+	case 0x40: sprintf(buffer, "BIT 0, B"); break;
+	case 0x41: sprintf(buffer, "BIT 0, C"); break;
+	case 0x42: sprintf(buffer, "BIT 0, D"); break;
+	case 0x43: sprintf(buffer, "BIT 0, E"); break;
+	case 0x44: sprintf(buffer, "BIT 0, H"); break;
+	case 0x45: sprintf(buffer, "BIT 0, L"); break;
+	case 0x46: sprintf(buffer, "BIT 0, (HL)"); break;
+	case 0x47: sprintf(buffer, "BIT 0, A"); break;
+	case 0x48: sprintf(buffer, "BIT 1, B"); break;
+	case 0x49: sprintf(buffer, "BIT 1, C"); break;
+	case 0x4a: sprintf(buffer, "BIT 1, D"); break;
+	case 0x4b: sprintf(buffer, "BIT 1, E"); break;
+	case 0x4c: sprintf(buffer, "BIT 1, H"); break;
+	case 0x4d: sprintf(buffer, "BIT 1, L"); break;
+	case 0x4e: sprintf(buffer, "BIT 1, (HL)"); break;
+	case 0x4f: sprintf(buffer, "BIT 1, A"); break;
+	case 0x50: sprintf(buffer, "BIT 2, B"); break;
+	case 0x51: sprintf(buffer, "BIT 2, C"); break;
+	case 0x52: sprintf(buffer, "BIT 2, D"); break;
+	case 0x53: sprintf(buffer, "BIT 2, E"); break;
+	case 0x54: sprintf(buffer, "BIT 2, H"); break;
+	case 0x55: sprintf(buffer, "BIT 2, L"); break;
+	case 0x56: sprintf(buffer, "BIT 2, (HL)"); break;
+	case 0x57: sprintf(buffer, "BIT 2, A"); break;
+	case 0x58: sprintf(buffer, "BIT 3, B"); break;
+	case 0x59: sprintf(buffer, "BIT 3, C"); break;
+	case 0x5a: sprintf(buffer, "BIT 3, D"); break;
+	case 0x5b: sprintf(buffer, "BIT 3, E"); break;
+	case 0x5c: sprintf(buffer, "BIT 3, H"); break;
+	case 0x5d: sprintf(buffer, "BIT 3, L"); break;
+	case 0x5e: sprintf(buffer, "BIT 3, (HL)"); break;
+	case 0x5f: sprintf(buffer, "BIT 3, A"); break;
+	case 0x60: sprintf(buffer, "BIT 4, B"); break;
+	case 0x61: sprintf(buffer, "BIT 4, C"); break;
+	case 0x62: sprintf(buffer, "BIT 4, D"); break;
+	case 0x63: sprintf(buffer, "BIT 4, E"); break;
+	case 0x64: sprintf(buffer, "BIT 4, H"); break;
+	case 0x65: sprintf(buffer, "BIT 4, L"); break;
+	case 0x66: sprintf(buffer, "BIT 4, (HL)"); break;
+	case 0x67: sprintf(buffer, "BIT 4, A"); break;
+	case 0x68: sprintf(buffer, "BIT 5, B"); break;
+	case 0x69: sprintf(buffer, "BIT 5, C"); break;
+	case 0x6a: sprintf(buffer, "BIT 5, D"); break;
+	case 0x6b: sprintf(buffer, "BIT 5, E"); break;
+	case 0x6c: sprintf(buffer, "BIT 5, H"); break;
+	case 0x6d: sprintf(buffer, "BIT 5, L"); break;
+	case 0x6e: sprintf(buffer, "BIT 5, (HL)"); break;
+	case 0x6f: sprintf(buffer, "BIT 5, A"); break;
+	case 0x70: sprintf(buffer, "BIT 6, B"); break;
+	case 0x71: sprintf(buffer, "BIT 6, C"); break;
+	case 0x72: sprintf(buffer, "BIT 6, D"); break;
+	case 0x73: sprintf(buffer, "BIT 6, E"); break;
+	case 0x74: sprintf(buffer, "BIT 6, H"); break;
+	case 0x75: sprintf(buffer, "BIT 6, L"); break;
+	case 0x76: sprintf(buffer, "BIT 6, (HL)"); break;
+	case 0x77: sprintf(buffer, "BIT 6, A"); break;
+	case 0x78: sprintf(buffer, "BIT 7, B"); break;
+	case 0x79: sprintf(buffer, "BIT 7, C"); break;
+	case 0x7a: sprintf(buffer, "BIT 7, D"); break;
+	case 0x7b: sprintf(buffer, "BIT 7, E"); break;
+	case 0x7c: sprintf(buffer, "BIT 7, H"); break;
+	case 0x7d: sprintf(buffer, "BIT 7, L"); break;
+	case 0x7e: sprintf(buffer, "BIT 7, (HL)"); break;
+	case 0x7f: sprintf(buffer, "BIT 7, A"); break;
+	case 0x80: sprintf(buffer, "RES 0, B"); break;
+	case 0x81: sprintf(buffer, "RES 0, C"); break;
+	case 0x82: sprintf(buffer, "RES 0, D"); break;
+	case 0x83: sprintf(buffer, "RES 0, E"); break;
+	case 0x84: sprintf(buffer, "RES 0, H"); break;
+	case 0x85: sprintf(buffer, "RES 0, L"); break;
+	case 0x86: sprintf(buffer, "RES 0, (HL)"); break;
+	case 0x87: sprintf(buffer, "RES 0, A"); break;
+	case 0x88: sprintf(buffer, "RES 1, B"); break;
+	case 0x89: sprintf(buffer, "RES 1, C"); break;
+	case 0x8a: sprintf(buffer, "RES 1, D"); break;
+	case 0x8b: sprintf(buffer, "RES 1, E"); break;
+	case 0x8c: sprintf(buffer, "RES 1, H"); break;
+	case 0x8d: sprintf(buffer, "RES 1, L"); break;
+	case 0x8e: sprintf(buffer, "RES 1, (HL)"); break;
+	case 0x8f: sprintf(buffer, "RES 1, A"); break;
+	case 0x90: sprintf(buffer, "RES 2, B"); break;
+	case 0x91: sprintf(buffer, "RES 2, C"); break;
+	case 0x92: sprintf(buffer, "RES 2, D"); break;
+	case 0x93: sprintf(buffer, "RES 2, E"); break;
+	case 0x94: sprintf(buffer, "RES 2, H"); break;
+	case 0x95: sprintf(buffer, "RES 2, L"); break;
+	case 0x96: sprintf(buffer, "RES 2, (HL)"); break;
+	case 0x97: sprintf(buffer, "RES 2, A"); break;
+	case 0x98: sprintf(buffer, "RES 3, B"); break;
+	case 0x99: sprintf(buffer, "RES 3, C"); break;
+	case 0x9a: sprintf(buffer, "RES 3, D"); break;
+	case 0x9b: sprintf(buffer, "RES 3, E"); break;
+	case 0x9c: sprintf(buffer, "RES 3, H"); break;
+	case 0x9d: sprintf(buffer, "RES 3, L"); break;
+	case 0x9e: sprintf(buffer, "RES 3, (HL)"); break;
+	case 0x9f: sprintf(buffer, "RES 3, A"); break;
+	case 0xa0: sprintf(buffer, "RES 4, B"); break;
+	case 0xa1: sprintf(buffer, "RES 4, C"); break;
+	case 0xa2: sprintf(buffer, "RES 4, D"); break;
+	case 0xa3: sprintf(buffer, "RES 4, E"); break;
+	case 0xa4: sprintf(buffer, "RES 4, H"); break;
+	case 0xa5: sprintf(buffer, "RES 4, L"); break;
+	case 0xa6: sprintf(buffer, "RES 4, (HL)"); break;
+	case 0xa7: sprintf(buffer, "RES 4, A"); break;
+	case 0xa8: sprintf(buffer, "RES 5, B"); break;
+	case 0xa9: sprintf(buffer, "RES 5, C"); break;
+	case 0xaa: sprintf(buffer, "RES 5, D"); break;
+	case 0xab: sprintf(buffer, "RES 5, E"); break;
+	case 0xac: sprintf(buffer, "RES 5, H"); break;
+	case 0xad: sprintf(buffer, "RES 5, L"); break;
+	case 0xae: sprintf(buffer, "RES 5, (HL)"); break;
+	case 0xaf: sprintf(buffer, "RES 5, A"); break;
+	case 0xb0: sprintf(buffer, "RES 6, B"); break;
+	case 0xb1: sprintf(buffer, "RES 6, C"); break;
+	case 0xb2: sprintf(buffer, "RES 6, D"); break;
+	case 0xb3: sprintf(buffer, "RES 6, E"); break;
+	case 0xb4: sprintf(buffer, "RES 6, H"); break;
+	case 0xb5: sprintf(buffer, "RES 6, L"); break;
+	case 0xb6: sprintf(buffer, "RES 6, (HL)"); break;
+	case 0xb7: sprintf(buffer, "RES 6, A"); break;
+	case 0xb8: sprintf(buffer, "RES 7, B"); break;
+	case 0xb9: sprintf(buffer, "RES 7, C"); break;
+	case 0xba: sprintf(buffer, "RES 7, D"); break;
+	case 0xbb: sprintf(buffer, "RES 7, E"); break;
+	case 0xbc: sprintf(buffer, "RES 7, H"); break;
+	case 0xbd: sprintf(buffer, "RES 7, L"); break;
+	case 0xbe: sprintf(buffer, "RES 7, (HL)"); break;
+	case 0xbf: sprintf(buffer, "RES 7, A"); break;
+	case 0xc0: sprintf(buffer, "SET 0, B"); break;
+	case 0xc1: sprintf(buffer, "SET 0, C"); break;
+	case 0xc2: sprintf(buffer, "SET 0, D"); break;
+	case 0xc3: sprintf(buffer, "SET 0, E"); break;
+	case 0xc4: sprintf(buffer, "SET 0, H"); break;
+	case 0xc5: sprintf(buffer, "SET 0, L"); break;
+	case 0xc6: sprintf(buffer, "SET 0, (HL)"); break;
+	case 0xc7: sprintf(buffer, "SET 0, A"); break;
+	case 0xc8: sprintf(buffer, "SET 1, B"); break;
+	case 0xc9: sprintf(buffer, "SET 1, C"); break;
+	case 0xca: sprintf(buffer, "SET 1, D"); break;
+	case 0xcb: sprintf(buffer, "SET 1, E"); break;
+	case 0xcc: sprintf(buffer, "SET 1, H"); break;
+	case 0xcd: sprintf(buffer, "SET 1, L"); break;
+	case 0xce: sprintf(buffer, "SET 1, (HL)"); break;
+	case 0xcf: sprintf(buffer, "SET 1, A"); break;
+	case 0xd0: sprintf(buffer, "SET 2, B"); break;
+	case 0xd1: sprintf(buffer, "SET 2, C"); break;
+	case 0xd2: sprintf(buffer, "SET 2, D"); break;
+	case 0xd3: sprintf(buffer, "SET 2, E"); break;
+	case 0xd4: sprintf(buffer, "SET 2, H"); break;
+	case 0xd5: sprintf(buffer, "SET 2, L"); break;
+	case 0xd6: sprintf(buffer, "SET 2, (HL)"); break;
+	case 0xd7: sprintf(buffer, "SET 2, A"); break;
+	case 0xd8: sprintf(buffer, "SET 3, B"); break;
+	case 0xd9: sprintf(buffer, "SET 3, C"); break;
+	case 0xda: sprintf(buffer, "SET 3, D"); break;
+	case 0xdb: sprintf(buffer, "SET 3, E"); break;
+	case 0xdc: sprintf(buffer, "SET 3, H"); break;
+	case 0xdd: sprintf(buffer, "SET 3, L"); break;
+	case 0xde: sprintf(buffer, "SET 3, (HL)"); break;
+	case 0xdf: sprintf(buffer, "SET 3, A"); break;
+	case 0xe0: sprintf(buffer, "SET 4, B"); break;
+	case 0xe1: sprintf(buffer, "SET 4, C"); break;
+	case 0xe2: sprintf(buffer, "SET 4, D"); break;
+	case 0xe3: sprintf(buffer, "SET 4, E"); break;
+	case 0xe4: sprintf(buffer, "SET 4, H"); break;
+	case 0xe5: sprintf(buffer, "SET 4, L"); break;
+	case 0xe6: sprintf(buffer, "SET 4, (HL)"); break;
+	case 0xe7: sprintf(buffer, "SET 4, A"); break;
+	case 0xe8: sprintf(buffer, "SET 5, B"); break;
+	case 0xe9: sprintf(buffer, "SET 5, C"); break;
+	case 0xea: sprintf(buffer, "SET 5, D"); break;
+	case 0xeb: sprintf(buffer, "SET 5, E"); break;
+	case 0xec: sprintf(buffer, "SET 5, H"); break;
+	case 0xed: sprintf(buffer, "SET 5, L"); break;
+	case 0xee: sprintf(buffer, "SET 5, (HL)"); break;
+	case 0xef: sprintf(buffer, "SET 5, A"); break;
+	case 0xf0: sprintf(buffer, "SET 6, B"); break;
+	case 0xf1: sprintf(buffer, "SET 6, C"); break;
+	case 0xf2: sprintf(buffer, "SET 6, D"); break;
+	case 0xf3: sprintf(buffer, "SET 6, E"); break;
+	case 0xf4: sprintf(buffer, "SET 6, H"); break;
+	case 0xf5: sprintf(buffer, "SET 6, L"); break;
+	case 0xf6: sprintf(buffer, "SET 6, (HL)"); break;
+	case 0xf7: sprintf(buffer, "SET 6, A"); break;
+	case 0xf8: sprintf(buffer, "SET 7, B"); break;
+	case 0xf9: sprintf(buffer, "SET 7, C"); break;
+	case 0xfa: sprintf(buffer, "SET 7, D"); break;
+	case 0xfb: sprintf(buffer, "SET 7, E"); break;
+	case 0xfc: sprintf(buffer, "SET 7, H"); break;
+	case 0xfd: sprintf(buffer, "SET 7, L"); break;
+	case 0xfe: sprintf(buffer, "SET 7, (HL)"); break;
+	case 0xff: sprintf(buffer, "SET 7, A"); break;
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
+	default: __assume(0);
+#endif
+	}
+}
+
+void dasm_dd(uint32 pc, char *buffer)
+{
+	uint8 code = dasm_fetchop();
+	int8 ofs;
+	
+	switch(code) {
+	case 0x09: sprintf(buffer, "ADD IX, BC"); break;
+	case 0x19: sprintf(buffer, "ADD IX, DE"); break;
+	case 0x21: sprintf(buffer, "LD IX, %04x", debug_fetch16()); break;
+	case 0x22: sprintf(buffer, "LD (%04x), IX", debug_fetch16()); break;
+	case 0x23: sprintf(buffer, "INC IX"); break;
+	case 0x24: sprintf(buffer, "INC HX"); break;
+	case 0x25: sprintf(buffer, "DEC HX"); break;
+	case 0x26: sprintf(buffer, "LD HX, %02x", debug_fetch8()); break;
+	case 0x29: sprintf(buffer, "ADD IX, IX"); break;
+	case 0x2a: sprintf(buffer, "LD IX, (%04x)", debug_fetch16()); break;
+	case 0x2b: sprintf(buffer, "DEC IX"); break;
+	case 0x2c: sprintf(buffer, "INC LX"); break;
+	case 0x2d: sprintf(buffer, "DEC LX"); break;
+	case 0x2e: sprintf(buffer, "LD LX, %02x", debug_fetch8()); break;
+	case 0x34: sprintf(buffer, "INC (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x35: sprintf(buffer, "DEC (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x36: ofs = debug_fetch8_rel(); sprintf(buffer, "LD (IX+(%d)), %02x", ofs, debug_fetch8()); break;
+	case 0x39: sprintf(buffer, "ADD IX, SP"); break;
+	case 0x44: sprintf(buffer, "LD B, HX"); break;
+	case 0x45: sprintf(buffer, "LD B, LX"); break;
+	case 0x46: sprintf(buffer, "LD B, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x4c: sprintf(buffer, "LD C, HX"); break;
+	case 0x4d: sprintf(buffer, "LD C, LX"); break;
+	case 0x4e: sprintf(buffer, "LD C, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x54: sprintf(buffer, "LD D, HX"); break;
+	case 0x55: sprintf(buffer, "LD D, LX"); break;
+	case 0x56: sprintf(buffer, "LD D, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x5c: sprintf(buffer, "LD E, HX"); break;
+	case 0x5d: sprintf(buffer, "LD E, LX"); break;
+	case 0x5e: sprintf(buffer, "LD E, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x60: sprintf(buffer, "LD HX, B"); break;
+	case 0x61: sprintf(buffer, "LD HX, C"); break;
+	case 0x62: sprintf(buffer, "LD HX, D"); break;
+	case 0x63: sprintf(buffer, "LD HX, E"); break;
+	case 0x64: sprintf(buffer, "LD HX, HX"); break;
+	case 0x65: sprintf(buffer, "LD HX, LX"); break;
+	case 0x66: sprintf(buffer, "LD H, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x67: sprintf(buffer, "LD HX, A"); break;
+	case 0x68: sprintf(buffer, "LD LX, B"); break;
+	case 0x69: sprintf(buffer, "LD LX, C"); break;
+	case 0x6a: sprintf(buffer, "LD LX, D"); break;
+	case 0x6b: sprintf(buffer, "LD LX, E"); break;
+	case 0x6c: sprintf(buffer, "LD LX, HX"); break;
+	case 0x6d: sprintf(buffer, "LD LX, LX"); break;
+	case 0x6e: sprintf(buffer, "LD L, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x6f: sprintf(buffer, "LD LX, A"); break;
+	case 0x70: sprintf(buffer, "LD (IX+(%d)), B", debug_fetch8_rel()); break;
+	case 0x71: sprintf(buffer, "LD (IX+(%d)), C", debug_fetch8_rel()); break;
+	case 0x72: sprintf(buffer, "LD (IX+(%d)), D", debug_fetch8_rel()); break;
+	case 0x73: sprintf(buffer, "LD (IX+(%d)), E", debug_fetch8_rel()); break;
+	case 0x74: sprintf(buffer, "LD (IX+(%d)), H", debug_fetch8_rel()); break;
+	case 0x75: sprintf(buffer, "LD (IX+(%d)), L", debug_fetch8_rel()); break;
+	case 0x77: sprintf(buffer, "LD (IX+(%d)), A", debug_fetch8_rel()); break;
+	case 0x7c: sprintf(buffer, "LD A, HX"); break;
+	case 0x7d: sprintf(buffer, "LD A, LX"); break;
+	case 0x7e: sprintf(buffer, "LD A, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x84: sprintf(buffer, "ADD A, HX"); break;
+	case 0x85: sprintf(buffer, "ADD A, LX"); break;
+	case 0x86: sprintf(buffer, "ADD A, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x8c: sprintf(buffer, "ADC A, HX"); break;
+	case 0x8d: sprintf(buffer, "ADC A, LX"); break;
+	case 0x8e: sprintf(buffer, "ADC A, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x94: sprintf(buffer, "SUB HX"); break;
+	case 0x95: sprintf(buffer, "SUB LX"); break;
+	case 0x96: sprintf(buffer, "SUB (IX+(%d))", debug_fetch8_rel()); break;
+	case 0x9c: sprintf(buffer, "SBC A, HX"); break;
+	case 0x9d: sprintf(buffer, "SBC A, LX"); break;
+	case 0x9e: sprintf(buffer, "SBC A, (IX+(%d))", debug_fetch8_rel()); break;
+	case 0xa4: sprintf(buffer, "AND HX"); break;
+	case 0xa5: sprintf(buffer, "AND LX"); break;
+	case 0xa6: sprintf(buffer, "AND (IX+(%d))", debug_fetch8_rel()); break;
+	case 0xac: sprintf(buffer, "XOR HX"); break;
+	case 0xad: sprintf(buffer, "XOR LX"); break;
+	case 0xae: sprintf(buffer, "XOR (IX+(%d))", debug_fetch8_rel()); break;
+	case 0xb4: sprintf(buffer, "OR HX"); break;
+	case 0xb5: sprintf(buffer, "OR LX"); break;
+	case 0xb6: sprintf(buffer, "OR (IX+(%d))", debug_fetch8_rel()); break;
+	case 0xbc: sprintf(buffer, "CP HX"); break;
+	case 0xbd: sprintf(buffer, "CP LX"); break;
+	case 0xbe: sprintf(buffer, "CP (IX+(%d))", debug_fetch8_rel()); break;
+	case 0xcb: dasm_ddcb(pc, buffer); break;
+	case 0xe1: sprintf(buffer, "POP IX"); break;
+	case 0xe3: sprintf(buffer, "EX (SP), IX"); break;
+	case 0xe5: sprintf(buffer, "PUSH IX"); break;
+	case 0xe9: sprintf(buffer, "JP (IX)"); break;
+	case 0xf9: sprintf(buffer, "LD SP, IX"); break;
+	default:   sprintf(buffer, "DB dd"); z80_dasm_ptr--; break;
+	}
+}
+
+void dasm_ed(uint32 pc, char *buffer)
+{
+	uint8 code = dasm_fetchop();
+	
+	switch(code) {
+	case 0x40: sprintf(buffer, "IN B, (C)"); break;
+	case 0x41: sprintf(buffer, "OUT (C), B"); break;
+	case 0x42: sprintf(buffer, "SBC HL, BC"); break;
+	case 0x43: sprintf(buffer, "LD (%04x), BC", debug_fetch16()); break;
+	case 0x44: sprintf(buffer, "NEG"); break;
+	case 0x45: sprintf(buffer, "RETN"); break;
+	case 0x46: sprintf(buffer, "IM 0"); break;
+	case 0x47: sprintf(buffer, "LD I, A"); break;
+	case 0x48: sprintf(buffer, "IN C, (C)"); break;
+	case 0x49: sprintf(buffer, "OUT (C), C"); break;
+	case 0x4a: sprintf(buffer, "ADC HL, BC"); break;
+	case 0x4b: sprintf(buffer, "LD BC, (%04x)", debug_fetch16()); break;
+	case 0x4c: sprintf(buffer, "NEG"); break;
+	case 0x4d: sprintf(buffer, "RETI"); break;
+	case 0x4e: sprintf(buffer, "IM 0"); break;
+	case 0x4f: sprintf(buffer, "LD R, A"); break;
+	case 0x50: sprintf(buffer, "IN D, (C)"); break;
+	case 0x51: sprintf(buffer, "OUT (C), D"); break;
+	case 0x52: sprintf(buffer, "SBC HL, DE"); break;
+	case 0x53: sprintf(buffer, "LD (%04x), DE", debug_fetch16()); break;
+	case 0x54: sprintf(buffer, "NEG"); break;
+	case 0x55: sprintf(buffer, "RETN"); break;
+	case 0x56: sprintf(buffer, "IM 1"); break;
+	case 0x57: sprintf(buffer, "LD A, I"); break;
+	case 0x58: sprintf(buffer, "IN E, (C)"); break;
+	case 0x59: sprintf(buffer, "OUT (C), E"); break;
+	case 0x5a: sprintf(buffer, "ADC HL, DE"); break;
+	case 0x5b: sprintf(buffer, "LD DE, (%04x)", debug_fetch16()); break;
+	case 0x5c: sprintf(buffer, "NEG"); break;
+	case 0x5d: sprintf(buffer, "RETI"); break;
+	case 0x5e: sprintf(buffer, "IM 2"); break;
+	case 0x5f: sprintf(buffer, "LD A, R"); break;
+	case 0x60: sprintf(buffer, "IN H, (C)"); break;
+	case 0x61: sprintf(buffer, "OUT (C), H"); break;
+	case 0x62: sprintf(buffer, "SBC HL, HL"); break;
+	case 0x63: sprintf(buffer, "LD (%04x), HL", debug_fetch16()); break;
+	case 0x64: sprintf(buffer, "NEG"); break;
+	case 0x65: sprintf(buffer, "RETN"); break;
+	case 0x66: sprintf(buffer, "IM 0"); break;
+	case 0x67: sprintf(buffer, "RRD (HL)"); break;
+	case 0x68: sprintf(buffer, "IN L, (C)"); break;
+	case 0x69: sprintf(buffer, "OUT (C), L"); break;
+	case 0x6a: sprintf(buffer, "ADC HL, HL"); break;
+	case 0x6b: sprintf(buffer, "LD HL, (%04x)", debug_fetch16()); break;
+	case 0x6c: sprintf(buffer, "NEG"); break;
+	case 0x6d: sprintf(buffer, "RETI"); break;
+	case 0x6e: sprintf(buffer, "IM 0"); break;
+	case 0x6f: sprintf(buffer, "RLD (HL)"); break;
+	case 0x70: sprintf(buffer, "IN F, (C)"); break;
+	case 0x71: sprintf(buffer, "OUT (C), 0"); break;
+	case 0x72: sprintf(buffer, "SBC HL, SP"); break;
+	case 0x73: sprintf(buffer, "LD (%04x), SP", debug_fetch16()); break;
+	case 0x74: sprintf(buffer, "NEG"); break;
+	case 0x75: sprintf(buffer, "RETN"); break;
+	case 0x76: sprintf(buffer, "IM 1"); break;
+	case 0x78: sprintf(buffer, "IN A, (C)"); break;
+	case 0x79: sprintf(buffer, "OUT (C), A"); break;
+	case 0x7a: sprintf(buffer, "ADC HL, SP"); break;
+	case 0x7b: sprintf(buffer, "LD SP, (%04x)", debug_fetch16()); break;
+	case 0x7c: sprintf(buffer, "NEG"); break;
+	case 0x7d: sprintf(buffer, "RETI"); break;
+	case 0x7e: sprintf(buffer, "IM 2"); break;
+	case 0xa0: sprintf(buffer, "LDI"); break;
+	case 0xa1: sprintf(buffer, "CPI"); break;
+	case 0xa2: sprintf(buffer, "INI"); break;
+	case 0xa3: sprintf(buffer, "OUTI"); break;
+	case 0xa8: sprintf(buffer, "LDD"); break;
+	case 0xa9: sprintf(buffer, "CPD"); break;
+	case 0xaa: sprintf(buffer, "IND"); break;
+	case 0xab: sprintf(buffer, "OUTD"); break;
+	case 0xb0: sprintf(buffer, "LDIR"); break;
+	case 0xb1: sprintf(buffer, "CPIR"); break;
+	case 0xb2: sprintf(buffer, "INIR"); break;
+	case 0xb3: sprintf(buffer, "OTIR"); break;
+	case 0xb8: sprintf(buffer, "LDDR"); break;
+	case 0xb9: sprintf(buffer, "CPDR"); break;
+	case 0xba: sprintf(buffer, "INDR"); break;
+	case 0xbb: sprintf(buffer, "OTDR"); break;
+	default:   sprintf(buffer, "DB ed"); z80_dasm_ptr--; break;
+	}
+}
+
+void dasm_fd(uint32 pc, char *buffer)
+{
+	uint8 code = dasm_fetchop();
+	int8 ofs;
+	
+	switch(code) {
+	case 0x09: sprintf(buffer, "ADD IY, BC"); break;
+	case 0x19: sprintf(buffer, "ADD IY, DE"); break;
+	case 0x21: sprintf(buffer, "LD IY, %04x", debug_fetch16()); break;
+	case 0x22: sprintf(buffer, "LD (%04x), IY", debug_fetch16()); break;
+	case 0x23: sprintf(buffer, "INC IY"); break;
+	case 0x24: sprintf(buffer, "INC HY"); break;
+	case 0x25: sprintf(buffer, "DEC HY"); break;
+	case 0x26: sprintf(buffer, "LD HY, %02x", debug_fetch8()); break;
+	case 0x29: sprintf(buffer, "ADD IY, IY"); break;
+	case 0x2a: sprintf(buffer, "LD IY, (%04x)", debug_fetch16()); break;
+	case 0x2b: sprintf(buffer, "DEC IY"); break;
+	case 0x2c: sprintf(buffer, "INC LY"); break;
+	case 0x2d: sprintf(buffer, "DEC LY"); break;
+	case 0x2e: sprintf(buffer, "LD LY, %02x", debug_fetch8()); break;
+	case 0x34: sprintf(buffer, "INC (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x35: sprintf(buffer, "DEC (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x36: ofs = debug_fetch8_rel(); sprintf(buffer, "LD (IY+(%d)), %02x", ofs, debug_fetch8()); break;
+	case 0x39: sprintf(buffer, "ADD IY, SP"); break;
+	case 0x44: sprintf(buffer, "LD B, HY"); break;
+	case 0x45: sprintf(buffer, "LD B, LY"); break;
+	case 0x46: sprintf(buffer, "LD B, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x4c: sprintf(buffer, "LD C, HY"); break;
+	case 0x4d: sprintf(buffer, "LD C, LY"); break;
+	case 0x4e: sprintf(buffer, "LD C, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x54: sprintf(buffer, "LD D, HY"); break;
+	case 0x55: sprintf(buffer, "LD D, LY"); break;
+	case 0x56: sprintf(buffer, "LD D, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x5c: sprintf(buffer, "LD E, HY"); break;
+	case 0x5d: sprintf(buffer, "LD E, LY"); break;
+	case 0x5e: sprintf(buffer, "LD E, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x60: sprintf(buffer, "LD HY, B"); break;
+	case 0x61: sprintf(buffer, "LD HY, C"); break;
+	case 0x62: sprintf(buffer, "LD HY, D"); break;
+	case 0x63: sprintf(buffer, "LD HY, E"); break;
+	case 0x64: sprintf(buffer, "LD HY, HY"); break;
+	case 0x65: sprintf(buffer, "LD HY, LY"); break;
+	case 0x66: sprintf(buffer, "LD H, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x67: sprintf(buffer, "LD HY, A"); break;
+	case 0x68: sprintf(buffer, "LD LY, B"); break;
+	case 0x69: sprintf(buffer, "LD LY, C"); break;
+	case 0x6a: sprintf(buffer, "LD LY, D"); break;
+	case 0x6b: sprintf(buffer, "LD LY, E"); break;
+	case 0x6c: sprintf(buffer, "LD LY, HY"); break;
+	case 0x6d: sprintf(buffer, "LD LY, LY"); break;
+	case 0x6e: sprintf(buffer, "LD L, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x6f: sprintf(buffer, "LD LY, A"); break;
+	case 0x70: sprintf(buffer, "LD (IY+(%d)), B", debug_fetch8_rel()); break;
+	case 0x71: sprintf(buffer, "LD (IY+(%d)), C", debug_fetch8_rel()); break;
+	case 0x72: sprintf(buffer, "LD (IY+(%d)), D", debug_fetch8_rel()); break;
+	case 0x73: sprintf(buffer, "LD (IY+(%d)), E", debug_fetch8_rel()); break;
+	case 0x74: sprintf(buffer, "LD (IY+(%d)), H", debug_fetch8_rel()); break;
+	case 0x75: sprintf(buffer, "LD (IY+(%d)), L", debug_fetch8_rel()); break;
+	case 0x77: sprintf(buffer, "LD (IY+(%d)), A", debug_fetch8_rel()); break;
+	case 0x7c: sprintf(buffer, "LD A, HY"); break;
+	case 0x7d: sprintf(buffer, "LD A, LY"); break;
+	case 0x7e: sprintf(buffer, "LD A, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x84: sprintf(buffer, "ADD A, HY"); break;
+	case 0x85: sprintf(buffer, "ADD A, LY"); break;
+	case 0x86: sprintf(buffer, "ADD A, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x8c: sprintf(buffer, "ADC A, HY"); break;
+	case 0x8d: sprintf(buffer, "ADC A, LY"); break;
+	case 0x8e: sprintf(buffer, "ADC A, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x94: sprintf(buffer, "SUB HY"); break;
+	case 0x95: sprintf(buffer, "SUB LY"); break;
+	case 0x96: sprintf(buffer, "SUB (IY+(%d))", debug_fetch8_rel()); break;
+	case 0x9c: sprintf(buffer, "SBC A, HY"); break;
+	case 0x9d: sprintf(buffer, "SBC A, LY"); break;
+	case 0x9e: sprintf(buffer, "SBC A, (IY+(%d))", debug_fetch8_rel()); break;
+	case 0xa4: sprintf(buffer, "AND HY"); break;
+	case 0xa5: sprintf(buffer, "AND LY"); break;
+	case 0xa6: sprintf(buffer, "AND (IY+(%d))", debug_fetch8_rel()); break;
+	case 0xac: sprintf(buffer, "XOR HY"); break;
+	case 0xad: sprintf(buffer, "XOR LY"); break;
+	case 0xae: sprintf(buffer, "XOR (IY+(%d))", debug_fetch8_rel()); break;
+	case 0xb4: sprintf(buffer, "OR HY"); break;
+	case 0xb5: sprintf(buffer, "OR LY"); break;
+	case 0xb6: sprintf(buffer, "OR (IY+(%d))", debug_fetch8_rel()); break;
+	case 0xbc: sprintf(buffer, "CP HY"); break;
+	case 0xbd: sprintf(buffer, "CP LY"); break;
+	case 0xbe: sprintf(buffer, "CP (IY+(%d))", debug_fetch8_rel()); break;
+	case 0xcb: dasm_fdcb(pc, buffer); break;
+	case 0xe1: sprintf(buffer, "POP IY"); break;
+	case 0xe3: sprintf(buffer, "EX (SP), IY"); break;
+	case 0xe5: sprintf(buffer, "PUSH IY"); break;
+	case 0xe9: sprintf(buffer, "JP (IY)"); break;
+	case 0xf9: sprintf(buffer, "LD SP, IY"); break;
+	default:   sprintf(buffer, "DB fd"); z80_dasm_ptr--; break;
+	}
+}
+
+void dasm_ddcb(uint32 pc, char *buffer)
+{
+	int8 ofs = debug_fetch8_rel();
+	uint8 code = debug_fetch8();
+	
+	switch(code) {
+	case 0x00: sprintf(buffer, "RLC B=(IX+(%d))", ofs); break;
+	case 0x01: sprintf(buffer, "RLC C=(IX+(%d))", ofs); break;
+	case 0x02: sprintf(buffer, "RLC D=(IX+(%d))", ofs); break;
+	case 0x03: sprintf(buffer, "RLC E=(IX+(%d))", ofs); break;
+	case 0x04: sprintf(buffer, "RLC H=(IX+(%d))", ofs); break;
+	case 0x05: sprintf(buffer, "RLC L=(IX+(%d))", ofs); break;
+	case 0x06: sprintf(buffer, "RLC (IX+(%d))", ofs); break;
+	case 0x07: sprintf(buffer, "RLC A=(IX+(%d))", ofs); break;
+	case 0x08: sprintf(buffer, "RRC B=(IX+(%d))", ofs); break;
+	case 0x09: sprintf(buffer, "RRC C=(IX+(%d))", ofs); break;
+	case 0x0a: sprintf(buffer, "RRC D=(IX+(%d))", ofs); break;
+	case 0x0b: sprintf(buffer, "RRC E=(IX+(%d))", ofs); break;
+	case 0x0c: sprintf(buffer, "RRC H=(IX+(%d))", ofs); break;
+	case 0x0d: sprintf(buffer, "RRC L=(IX+(%d))", ofs); break;
+	case 0x0e: sprintf(buffer, "RRC (IX+(%d))", ofs); break;
+	case 0x0f: sprintf(buffer, "RRC A=(IX+(%d))", ofs); break;
+	case 0x10: sprintf(buffer, "RL B=(IX+(%d))", ofs); break;
+	case 0x11: sprintf(buffer, "RL C=(IX+(%d))", ofs); break;
+	case 0x12: sprintf(buffer, "RL D=(IX+(%d))", ofs); break;
+	case 0x13: sprintf(buffer, "RL E=(IX+(%d))", ofs); break;
+	case 0x14: sprintf(buffer, "RL H=(IX+(%d))", ofs); break;
+	case 0x15: sprintf(buffer, "RL L=(IX+(%d))", ofs); break;
+	case 0x16: sprintf(buffer, "RL (IX+(%d))", ofs); break;
+	case 0x17: sprintf(buffer, "RL A=(IX+(%d))", ofs); break;
+	case 0x18: sprintf(buffer, "RR B=(IX+(%d))", ofs); break;
+	case 0x19: sprintf(buffer, "RR C=(IX+(%d))", ofs); break;
+	case 0x1a: sprintf(buffer, "RR D=(IX+(%d))", ofs); break;
+	case 0x1b: sprintf(buffer, "RR E=(IX+(%d))", ofs); break;
+	case 0x1c: sprintf(buffer, "RR H=(IX+(%d))", ofs); break;
+	case 0x1d: sprintf(buffer, "RR L=(IX+(%d))", ofs); break;
+	case 0x1e: sprintf(buffer, "RR (IX+(%d))", ofs); break;
+	case 0x1f: sprintf(buffer, "RR A=(IX+(%d))", ofs); break;
+	case 0x20: sprintf(buffer, "SLA B=(IX+(%d))", ofs); break;
+	case 0x21: sprintf(buffer, "SLA C=(IX+(%d))", ofs); break;
+	case 0x22: sprintf(buffer, "SLA D=(IX+(%d))", ofs); break;
+	case 0x23: sprintf(buffer, "SLA E=(IX+(%d))", ofs); break;
+	case 0x24: sprintf(buffer, "SLA H=(IX+(%d))", ofs); break;
+	case 0x25: sprintf(buffer, "SLA L=(IX+(%d))", ofs); break;
+	case 0x26: sprintf(buffer, "SLA (IX+(%d))", ofs); break;
+	case 0x27: sprintf(buffer, "SLA A=(IX+(%d))", ofs); break;
+	case 0x28: sprintf(buffer, "SRA B=(IX+(%d))", ofs); break;
+	case 0x29: sprintf(buffer, "SRA C=(IX+(%d))", ofs); break;
+	case 0x2a: sprintf(buffer, "SRA D=(IX+(%d))", ofs); break;
+	case 0x2b: sprintf(buffer, "SRA E=(IX+(%d))", ofs); break;
+	case 0x2c: sprintf(buffer, "SRA H=(IX+(%d))", ofs); break;
+	case 0x2d: sprintf(buffer, "SRA L=(IX+(%d))", ofs); break;
+	case 0x2e: sprintf(buffer, "SRA (IX+(%d))", ofs); break;
+	case 0x2f: sprintf(buffer, "SRA A=(IX+(%d))", ofs); break;
+	case 0x30: sprintf(buffer, "SLL B=(IX+(%d))", ofs); break;
+	case 0x31: sprintf(buffer, "SLL C=(IX+(%d))", ofs); break;
+	case 0x32: sprintf(buffer, "SLL D=(IX+(%d))", ofs); break;
+	case 0x33: sprintf(buffer, "SLL E=(IX+(%d))", ofs); break;
+	case 0x34: sprintf(buffer, "SLL H=(IX+(%d))", ofs); break;
+	case 0x35: sprintf(buffer, "SLL L=(IX+(%d))", ofs); break;
+	case 0x36: sprintf(buffer, "SLL (IX+(%d))", ofs); break;
+	case 0x37: sprintf(buffer, "SLL A=(IX+(%d))", ofs); break;
+	case 0x38: sprintf(buffer, "SRL B=(IX+(%d))", ofs); break;
+	case 0x39: sprintf(buffer, "SRL C=(IX+(%d))", ofs); break;
+	case 0x3a: sprintf(buffer, "SRL D=(IX+(%d))", ofs); break;
+	case 0x3b: sprintf(buffer, "SRL E=(IX+(%d))", ofs); break;
+	case 0x3c: sprintf(buffer, "SRL H=(IX+(%d))", ofs); break;
+	case 0x3d: sprintf(buffer, "SRL L=(IX+(%d))", ofs); break;
+	case 0x3e: sprintf(buffer, "SRL (IX+(%d))", ofs); break;
+	case 0x3f: sprintf(buffer, "SRL A=(IX+(%d))", ofs); break;
+	case 0x40: sprintf(buffer, "BIT 0, B=(IX+(%d))", ofs); break;
+	case 0x41: sprintf(buffer, "BIT 0, C=(IX+(%d))", ofs); break;
+	case 0x42: sprintf(buffer, "BIT 0, D=(IX+(%d))", ofs); break;
+	case 0x43: sprintf(buffer, "BIT 0, E=(IX+(%d))", ofs); break;
+	case 0x44: sprintf(buffer, "BIT 0, H=(IX+(%d))", ofs); break;
+	case 0x45: sprintf(buffer, "BIT 0, L=(IX+(%d))", ofs); break;
+	case 0x46: sprintf(buffer, "BIT 0, (IX+(%d))", ofs); break;
+	case 0x47: sprintf(buffer, "BIT 0, A=(IX+(%d))", ofs); break;
+	case 0x48: sprintf(buffer, "BIT 1, B=(IX+(%d))", ofs); break;
+	case 0x49: sprintf(buffer, "BIT 1, C=(IX+(%d))", ofs); break;
+	case 0x4a: sprintf(buffer, "BIT 1, D=(IX+(%d))", ofs); break;
+	case 0x4b: sprintf(buffer, "BIT 1, E=(IX+(%d))", ofs); break;
+	case 0x4c: sprintf(buffer, "BIT 1, H=(IX+(%d))", ofs); break;
+	case 0x4d: sprintf(buffer, "BIT 1, L=(IX+(%d))", ofs); break;
+	case 0x4e: sprintf(buffer, "BIT 1, (IX+(%d))", ofs); break;
+	case 0x4f: sprintf(buffer, "BIT 1, A=(IX+(%d))", ofs); break;
+	case 0x50: sprintf(buffer, "BIT 2, B=(IX+(%d))", ofs); break;
+	case 0x51: sprintf(buffer, "BIT 2, C=(IX+(%d))", ofs); break;
+	case 0x52: sprintf(buffer, "BIT 2, D=(IX+(%d))", ofs); break;
+	case 0x53: sprintf(buffer, "BIT 2, E=(IX+(%d))", ofs); break;
+	case 0x54: sprintf(buffer, "BIT 2, H=(IX+(%d))", ofs); break;
+	case 0x55: sprintf(buffer, "BIT 2, L=(IX+(%d))", ofs); break;
+	case 0x56: sprintf(buffer, "BIT 2, (IX+(%d))", ofs); break;
+	case 0x57: sprintf(buffer, "BIT 2, A=(IX+(%d))", ofs); break;
+	case 0x58: sprintf(buffer, "BIT 3, B=(IX+(%d))", ofs); break;
+	case 0x59: sprintf(buffer, "BIT 3, C=(IX+(%d))", ofs); break;
+	case 0x5a: sprintf(buffer, "BIT 3, D=(IX+(%d))", ofs); break;
+	case 0x5b: sprintf(buffer, "BIT 3, E=(IX+(%d))", ofs); break;
+	case 0x5c: sprintf(buffer, "BIT 3, H=(IX+(%d))", ofs); break;
+	case 0x5d: sprintf(buffer, "BIT 3, L=(IX+(%d))", ofs); break;
+	case 0x5e: sprintf(buffer, "BIT 3, (IX+(%d))", ofs); break;
+	case 0x5f: sprintf(buffer, "BIT 3, A=(IX+(%d))", ofs); break;
+	case 0x60: sprintf(buffer, "BIT 4, B=(IX+(%d))", ofs); break;
+	case 0x61: sprintf(buffer, "BIT 4, C=(IX+(%d))", ofs); break;
+	case 0x62: sprintf(buffer, "BIT 4, D=(IX+(%d))", ofs); break;
+	case 0x63: sprintf(buffer, "BIT 4, E=(IX+(%d))", ofs); break;
+	case 0x64: sprintf(buffer, "BIT 4, H=(IX+(%d))", ofs); break;
+	case 0x65: sprintf(buffer, "BIT 4, L=(IX+(%d))", ofs); break;
+	case 0x66: sprintf(buffer, "BIT 4, (IX+(%d))", ofs); break;
+	case 0x67: sprintf(buffer, "BIT 4, A=(IX+(%d))", ofs); break;
+	case 0x68: sprintf(buffer, "BIT 5, B=(IX+(%d))", ofs); break;
+	case 0x69: sprintf(buffer, "BIT 5, C=(IX+(%d))", ofs); break;
+	case 0x6a: sprintf(buffer, "BIT 5, D=(IX+(%d))", ofs); break;
+	case 0x6b: sprintf(buffer, "BIT 5, E=(IX+(%d))", ofs); break;
+	case 0x6c: sprintf(buffer, "BIT 5, H=(IX+(%d))", ofs); break;
+	case 0x6d: sprintf(buffer, "BIT 5, L=(IX+(%d))", ofs); break;
+	case 0x6e: sprintf(buffer, "BIT 5, (IX+(%d))", ofs); break;
+	case 0x6f: sprintf(buffer, "BIT 5, A=(IX+(%d))", ofs); break;
+	case 0x70: sprintf(buffer, "BIT 6, B=(IX+(%d))", ofs); break;
+	case 0x71: sprintf(buffer, "BIT 6, C=(IX+(%d))", ofs); break;
+	case 0x72: sprintf(buffer, "BIT 6, D=(IX+(%d))", ofs); break;
+	case 0x73: sprintf(buffer, "BIT 6, E=(IX+(%d))", ofs); break;
+	case 0x74: sprintf(buffer, "BIT 6, H=(IX+(%d))", ofs); break;
+	case 0x75: sprintf(buffer, "BIT 6, L=(IX+(%d))", ofs); break;
+	case 0x76: sprintf(buffer, "BIT 6, (IX+(%d))", ofs); break;
+	case 0x77: sprintf(buffer, "BIT 6, A=(IX+(%d))", ofs); break;
+	case 0x78: sprintf(buffer, "BIT 7, B=(IX+(%d))", ofs); break;
+	case 0x79: sprintf(buffer, "BIT 7, C=(IX+(%d))", ofs); break;
+	case 0x7a: sprintf(buffer, "BIT 7, D=(IX+(%d))", ofs); break;
+	case 0x7b: sprintf(buffer, "BIT 7, E=(IX+(%d))", ofs); break;
+	case 0x7c: sprintf(buffer, "BIT 7, H=(IX+(%d))", ofs); break;
+	case 0x7d: sprintf(buffer, "BIT 7, L=(IX+(%d))", ofs); break;
+	case 0x7e: sprintf(buffer, "BIT 7, (IX+(%d))", ofs); break;
+	case 0x7f: sprintf(buffer, "BIT 7, A=(IX+(%d))", ofs); break;
+	case 0x80: sprintf(buffer, "RES 0, B=(IX+(%d))", ofs); break;
+	case 0x81: sprintf(buffer, "RES 0, C=(IX+(%d))", ofs); break;
+	case 0x82: sprintf(buffer, "RES 0, D=(IX+(%d))", ofs); break;
+	case 0x83: sprintf(buffer, "RES 0, E=(IX+(%d))", ofs); break;
+	case 0x84: sprintf(buffer, "RES 0, H=(IX+(%d))", ofs); break;
+	case 0x85: sprintf(buffer, "RES 0, L=(IX+(%d))", ofs); break;
+	case 0x86: sprintf(buffer, "RES 0, (IX+(%d))", ofs); break;
+	case 0x87: sprintf(buffer, "RES 0, A=(IX+(%d))", ofs); break;
+	case 0x88: sprintf(buffer, "RES 1, B=(IX+(%d))", ofs); break;
+	case 0x89: sprintf(buffer, "RES 1, C=(IX+(%d))", ofs); break;
+	case 0x8a: sprintf(buffer, "RES 1, D=(IX+(%d))", ofs); break;
+	case 0x8b: sprintf(buffer, "RES 1, E=(IX+(%d))", ofs); break;
+	case 0x8c: sprintf(buffer, "RES 1, H=(IX+(%d))", ofs); break;
+	case 0x8d: sprintf(buffer, "RES 1, L=(IX+(%d))", ofs); break;
+	case 0x8e: sprintf(buffer, "RES 1, (IX+(%d))", ofs); break;
+	case 0x8f: sprintf(buffer, "RES 1, A=(IX+(%d))", ofs); break;
+	case 0x90: sprintf(buffer, "RES 2, B=(IX+(%d))", ofs); break;
+	case 0x91: sprintf(buffer, "RES 2, C=(IX+(%d))", ofs); break;
+	case 0x92: sprintf(buffer, "RES 2, D=(IX+(%d))", ofs); break;
+	case 0x93: sprintf(buffer, "RES 2, E=(IX+(%d))", ofs); break;
+	case 0x94: sprintf(buffer, "RES 2, H=(IX+(%d))", ofs); break;
+	case 0x95: sprintf(buffer, "RES 2, L=(IX+(%d))", ofs); break;
+	case 0x96: sprintf(buffer, "RES 2, (IX+(%d))", ofs); break;
+	case 0x97: sprintf(buffer, "RES 2, A=(IX+(%d))", ofs); break;
+	case 0x98: sprintf(buffer, "RES 3, B=(IX+(%d))", ofs); break;
+	case 0x99: sprintf(buffer, "RES 3, C=(IX+(%d))", ofs); break;
+	case 0x9a: sprintf(buffer, "RES 3, D=(IX+(%d))", ofs); break;
+	case 0x9b: sprintf(buffer, "RES 3, E=(IX+(%d))", ofs); break;
+	case 0x9c: sprintf(buffer, "RES 3, H=(IX+(%d))", ofs); break;
+	case 0x9d: sprintf(buffer, "RES 3, L=(IX+(%d))", ofs); break;
+	case 0x9e: sprintf(buffer, "RES 3, (IX+(%d))", ofs); break;
+	case 0x9f: sprintf(buffer, "RES 3, A=(IX+(%d))", ofs); break;
+	case 0xa0: sprintf(buffer, "RES 4, B=(IX+(%d))", ofs); break;
+	case 0xa1: sprintf(buffer, "RES 4, C=(IX+(%d))", ofs); break;
+	case 0xa2: sprintf(buffer, "RES 4, D=(IX+(%d))", ofs); break;
+	case 0xa3: sprintf(buffer, "RES 4, E=(IX+(%d))", ofs); break;
+	case 0xa4: sprintf(buffer, "RES 4, H=(IX+(%d))", ofs); break;
+	case 0xa5: sprintf(buffer, "RES 4, L=(IX+(%d))", ofs); break;
+	case 0xa6: sprintf(buffer, "RES 4, (IX+(%d))", ofs); break;
+	case 0xa7: sprintf(buffer, "RES 4, A=(IX+(%d))", ofs); break;
+	case 0xa8: sprintf(buffer, "RES 5, B=(IX+(%d))", ofs); break;
+	case 0xa9: sprintf(buffer, "RES 5, C=(IX+(%d))", ofs); break;
+	case 0xaa: sprintf(buffer, "RES 5, D=(IX+(%d))", ofs); break;
+	case 0xab: sprintf(buffer, "RES 5, E=(IX+(%d))", ofs); break;
+	case 0xac: sprintf(buffer, "RES 5, H=(IX+(%d))", ofs); break;
+	case 0xad: sprintf(buffer, "RES 5, L=(IX+(%d))", ofs); break;
+	case 0xae: sprintf(buffer, "RES 5, (IX+(%d))", ofs); break;
+	case 0xaf: sprintf(buffer, "RES 5, A=(IX+(%d))", ofs); break;
+	case 0xb0: sprintf(buffer, "RES 6, B=(IX+(%d))", ofs); break;
+	case 0xb1: sprintf(buffer, "RES 6, C=(IX+(%d))", ofs); break;
+	case 0xb2: sprintf(buffer, "RES 6, D=(IX+(%d))", ofs); break;
+	case 0xb3: sprintf(buffer, "RES 6, E=(IX+(%d))", ofs); break;
+	case 0xb4: sprintf(buffer, "RES 6, H=(IX+(%d))", ofs); break;
+	case 0xb5: sprintf(buffer, "RES 6, L=(IX+(%d))", ofs); break;
+	case 0xb6: sprintf(buffer, "RES 6, (IX+(%d))", ofs); break;
+	case 0xb7: sprintf(buffer, "RES 6, A=(IX+(%d))", ofs); break;
+	case 0xb8: sprintf(buffer, "RES 7, B=(IX+(%d))", ofs); break;
+	case 0xb9: sprintf(buffer, "RES 7, C=(IX+(%d))", ofs); break;
+	case 0xba: sprintf(buffer, "RES 7, D=(IX+(%d))", ofs); break;
+	case 0xbb: sprintf(buffer, "RES 7, E=(IX+(%d))", ofs); break;
+	case 0xbc: sprintf(buffer, "RES 7, H=(IX+(%d))", ofs); break;
+	case 0xbd: sprintf(buffer, "RES 7, L=(IX+(%d))", ofs); break;
+	case 0xbe: sprintf(buffer, "RES 7, (IX+(%d))", ofs); break;
+	case 0xbf: sprintf(buffer, "RES 7, A=(IX+(%d))", ofs); break;
+	case 0xc0: sprintf(buffer, "SET 0, B=(IX+(%d))", ofs); break;
+	case 0xc1: sprintf(buffer, "SET 0, C=(IX+(%d))", ofs); break;
+	case 0xc2: sprintf(buffer, "SET 0, D=(IX+(%d))", ofs); break;
+	case 0xc3: sprintf(buffer, "SET 0, E=(IX+(%d))", ofs); break;
+	case 0xc4: sprintf(buffer, "SET 0, H=(IX+(%d))", ofs); break;
+	case 0xc5: sprintf(buffer, "SET 0, L=(IX+(%d))", ofs); break;
+	case 0xc6: sprintf(buffer, "SET 0, (IX+(%d))", ofs); break;
+	case 0xc7: sprintf(buffer, "SET 0, A=(IX+(%d))", ofs); break;
+	case 0xc8: sprintf(buffer, "SET 1, B=(IX+(%d))", ofs); break;
+	case 0xc9: sprintf(buffer, "SET 1, C=(IX+(%d))", ofs); break;
+	case 0xca: sprintf(buffer, "SET 1, D=(IX+(%d))", ofs); break;
+	case 0xcb: sprintf(buffer, "SET 1, E=(IX+(%d))", ofs); break;
+	case 0xcc: sprintf(buffer, "SET 1, H=(IX+(%d))", ofs); break;
+	case 0xcd: sprintf(buffer, "SET 1, L=(IX+(%d))", ofs); break;
+	case 0xce: sprintf(buffer, "SET 1, (IX+(%d))", ofs); break;
+	case 0xcf: sprintf(buffer, "SET 1, A=(IX+(%d))", ofs); break;
+	case 0xd0: sprintf(buffer, "SET 2, B=(IX+(%d))", ofs); break;
+	case 0xd1: sprintf(buffer, "SET 2, C=(IX+(%d))", ofs); break;
+	case 0xd2: sprintf(buffer, "SET 2, D=(IX+(%d))", ofs); break;
+	case 0xd3: sprintf(buffer, "SET 2, E=(IX+(%d))", ofs); break;
+	case 0xd4: sprintf(buffer, "SET 2, H=(IX+(%d))", ofs); break;
+	case 0xd5: sprintf(buffer, "SET 2, L=(IX+(%d))", ofs); break;
+	case 0xd6: sprintf(buffer, "SET 2, (IX+(%d))", ofs); break;
+	case 0xd7: sprintf(buffer, "SET 2, A=(IX+(%d))", ofs); break;
+	case 0xd8: sprintf(buffer, "SET 3, B=(IX+(%d))", ofs); break;
+	case 0xd9: sprintf(buffer, "SET 3, C=(IX+(%d))", ofs); break;
+	case 0xda: sprintf(buffer, "SET 3, D=(IX+(%d))", ofs); break;
+	case 0xdb: sprintf(buffer, "SET 3, E=(IX+(%d))", ofs); break;
+	case 0xdc: sprintf(buffer, "SET 3, H=(IX+(%d))", ofs); break;
+	case 0xdd: sprintf(buffer, "SET 3, L=(IX+(%d))", ofs); break;
+	case 0xde: sprintf(buffer, "SET 3, (IX+(%d))", ofs); break;
+	case 0xdf: sprintf(buffer, "SET 3, A=(IX+(%d))", ofs); break;
+	case 0xe0: sprintf(buffer, "SET 4, B=(IX+(%d))", ofs); break;
+	case 0xe1: sprintf(buffer, "SET 4, C=(IX+(%d))", ofs); break;
+	case 0xe2: sprintf(buffer, "SET 4, D=(IX+(%d))", ofs); break;
+	case 0xe3: sprintf(buffer, "SET 4, E=(IX+(%d))", ofs); break;
+	case 0xe4: sprintf(buffer, "SET 4, H=(IX+(%d))", ofs); break;
+	case 0xe5: sprintf(buffer, "SET 4, L=(IX+(%d))", ofs); break;
+	case 0xe6: sprintf(buffer, "SET 4, (IX+(%d))", ofs); break;
+	case 0xe7: sprintf(buffer, "SET 4, A=(IX+(%d))", ofs); break;
+	case 0xe8: sprintf(buffer, "SET 5, B=(IX+(%d))", ofs); break;
+	case 0xe9: sprintf(buffer, "SET 5, C=(IX+(%d))", ofs); break;
+	case 0xea: sprintf(buffer, "SET 5, D=(IX+(%d))", ofs); break;
+	case 0xeb: sprintf(buffer, "SET 5, E=(IX+(%d))", ofs); break;
+	case 0xec: sprintf(buffer, "SET 5, H=(IX+(%d))", ofs); break;
+	case 0xed: sprintf(buffer, "SET 5, L=(IX+(%d))", ofs); break;
+	case 0xee: sprintf(buffer, "SET 5, (IX+(%d))", ofs); break;
+	case 0xef: sprintf(buffer, "SET 5, A=(IX+(%d))", ofs); break;
+	case 0xf0: sprintf(buffer, "SET 6, B=(IX+(%d))", ofs); break;
+	case 0xf1: sprintf(buffer, "SET 6, C=(IX+(%d))", ofs); break;
+	case 0xf2: sprintf(buffer, "SET 6, D=(IX+(%d))", ofs); break;
+	case 0xf3: sprintf(buffer, "SET 6, E=(IX+(%d))", ofs); break;
+	case 0xf4: sprintf(buffer, "SET 6, H=(IX+(%d))", ofs); break;
+	case 0xf5: sprintf(buffer, "SET 6, L=(IX+(%d))", ofs); break;
+	case 0xf6: sprintf(buffer, "SET 6, (IX+(%d))", ofs); break;
+	case 0xf7: sprintf(buffer, "SET 6, A=(IX+(%d))", ofs); break;
+	case 0xf8: sprintf(buffer, "SET 7, B=(IX+(%d))", ofs); break;
+	case 0xf9: sprintf(buffer, "SET 7, C=(IX+(%d))", ofs); break;
+	case 0xfa: sprintf(buffer, "SET 7, D=(IX+(%d))", ofs); break;
+	case 0xfb: sprintf(buffer, "SET 7, E=(IX+(%d))", ofs); break;
+	case 0xfc: sprintf(buffer, "SET 7, H=(IX+(%d))", ofs); break;
+	case 0xfd: sprintf(buffer, "SET 7, L=(IX+(%d))", ofs); break;
+	case 0xfe: sprintf(buffer, "SET 7, (IX+(%d))", ofs); break;
+	case 0xff: sprintf(buffer, "SET 7, A=(IX+(%d))", ofs); break;
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
+	default: __assume(0);
+#endif
+	}
+}
+
+void dasm_fdcb(uint32 pc, char *buffer)
+{
+	int8 ofs = debug_fetch8_rel();
+	uint8 code = debug_fetch8();
+	
+	switch(code) {
+	case 0x00: sprintf(buffer, "RLC B=(IY+(%d))", ofs); break;
+	case 0x01: sprintf(buffer, "RLC C=(IY+(%d))", ofs); break;
+	case 0x02: sprintf(buffer, "RLC D=(IY+(%d))", ofs); break;
+	case 0x03: sprintf(buffer, "RLC E=(IY+(%d))", ofs); break;
+	case 0x04: sprintf(buffer, "RLC H=(IY+(%d))", ofs); break;
+	case 0x05: sprintf(buffer, "RLC L=(IY+(%d))", ofs); break;
+	case 0x06: sprintf(buffer, "RLC (IY+(%d))", ofs); break;
+	case 0x07: sprintf(buffer, "RLC A=(IY+(%d))", ofs); break;
+	case 0x08: sprintf(buffer, "RRC B=(IY+(%d))", ofs); break;
+	case 0x09: sprintf(buffer, "RRC C=(IY+(%d))", ofs); break;
+	case 0x0a: sprintf(buffer, "RRC D=(IY+(%d))", ofs); break;
+	case 0x0b: sprintf(buffer, "RRC E=(IY+(%d))", ofs); break;
+	case 0x0c: sprintf(buffer, "RRC H=(IY+(%d))", ofs); break;
+	case 0x0d: sprintf(buffer, "RRC L=(IY+(%d))", ofs); break;
+	case 0x0e: sprintf(buffer, "RRC (IY+(%d))", ofs); break;
+	case 0x0f: sprintf(buffer, "RRC A=(IY+(%d))", ofs); break;
+	case 0x10: sprintf(buffer, "RL B=(IY+(%d))", ofs); break;
+	case 0x11: sprintf(buffer, "RL C=(IY+(%d))", ofs); break;
+	case 0x12: sprintf(buffer, "RL D=(IY+(%d))", ofs); break;
+	case 0x13: sprintf(buffer, "RL E=(IY+(%d))", ofs); break;
+	case 0x14: sprintf(buffer, "RL H=(IY+(%d))", ofs); break;
+	case 0x15: sprintf(buffer, "RL L=(IY+(%d))", ofs); break;
+	case 0x16: sprintf(buffer, "RL (IY+(%d))", ofs); break;
+	case 0x17: sprintf(buffer, "RL A=(IY+(%d))", ofs); break;
+	case 0x18: sprintf(buffer, "RR B=(IY+(%d))", ofs); break;
+	case 0x19: sprintf(buffer, "RR C=(IY+(%d))", ofs); break;
+	case 0x1a: sprintf(buffer, "RR D=(IY+(%d))", ofs); break;
+	case 0x1b: sprintf(buffer, "RR E=(IY+(%d))", ofs); break;
+	case 0x1c: sprintf(buffer, "RR H=(IY+(%d))", ofs); break;
+	case 0x1d: sprintf(buffer, "RR L=(IY+(%d))", ofs); break;
+	case 0x1e: sprintf(buffer, "RR (IY+(%d))", ofs); break;
+	case 0x1f: sprintf(buffer, "RR A=(IY+(%d))", ofs); break;
+	case 0x20: sprintf(buffer, "SLA B=(IY+(%d))", ofs); break;
+	case 0x21: sprintf(buffer, "SLA C=(IY+(%d))", ofs); break;
+	case 0x22: sprintf(buffer, "SLA D=(IY+(%d))", ofs); break;
+	case 0x23: sprintf(buffer, "SLA E=(IY+(%d))", ofs); break;
+	case 0x24: sprintf(buffer, "SLA H=(IY+(%d))", ofs); break;
+	case 0x25: sprintf(buffer, "SLA L=(IY+(%d))", ofs); break;
+	case 0x26: sprintf(buffer, "SLA (IY+(%d))", ofs); break;
+	case 0x27: sprintf(buffer, "SLA A=(IY+(%d))", ofs); break;
+	case 0x28: sprintf(buffer, "SRA B=(IY+(%d))", ofs); break;
+	case 0x29: sprintf(buffer, "SRA C=(IY+(%d))", ofs); break;
+	case 0x2a: sprintf(buffer, "SRA D=(IY+(%d))", ofs); break;
+	case 0x2b: sprintf(buffer, "SRA E=(IY+(%d))", ofs); break;
+	case 0x2c: sprintf(buffer, "SRA H=(IY+(%d))", ofs); break;
+	case 0x2d: sprintf(buffer, "SRA L=(IY+(%d))", ofs); break;
+	case 0x2e: sprintf(buffer, "SRA (IY+(%d))", ofs); break;
+	case 0x2f: sprintf(buffer, "SRA A=(IY+(%d))", ofs); break;
+	case 0x30: sprintf(buffer, "SLL B=(IY+(%d))", ofs); break;
+	case 0x31: sprintf(buffer, "SLL C=(IY+(%d))", ofs); break;
+	case 0x32: sprintf(buffer, "SLL D=(IY+(%d))", ofs); break;
+	case 0x33: sprintf(buffer, "SLL E=(IY+(%d))", ofs); break;
+	case 0x34: sprintf(buffer, "SLL H=(IY+(%d))", ofs); break;
+	case 0x35: sprintf(buffer, "SLL L=(IY+(%d))", ofs); break;
+	case 0x36: sprintf(buffer, "SLL (IY+(%d))", ofs); break;
+	case 0x37: sprintf(buffer, "SLL A=(IY+(%d))", ofs); break;
+	case 0x38: sprintf(buffer, "SRL B=(IY+(%d))", ofs); break;
+	case 0x39: sprintf(buffer, "SRL C=(IY+(%d))", ofs); break;
+	case 0x3a: sprintf(buffer, "SRL D=(IY+(%d))", ofs); break;
+	case 0x3b: sprintf(buffer, "SRL E=(IY+(%d))", ofs); break;
+	case 0x3c: sprintf(buffer, "SRL H=(IY+(%d))", ofs); break;
+	case 0x3d: sprintf(buffer, "SRL L=(IY+(%d))", ofs); break;
+	case 0x3e: sprintf(buffer, "SRL (IY+(%d))", ofs); break;
+	case 0x3f: sprintf(buffer, "SRL A=(IY+(%d))", ofs); break;
+	case 0x40: sprintf(buffer, "BIT 0, B=(IY+(%d))", ofs); break;
+	case 0x41: sprintf(buffer, "BIT 0, C=(IY+(%d))", ofs); break;
+	case 0x42: sprintf(buffer, "BIT 0, D=(IY+(%d))", ofs); break;
+	case 0x43: sprintf(buffer, "BIT 0, E=(IY+(%d))", ofs); break;
+	case 0x44: sprintf(buffer, "BIT 0, H=(IY+(%d))", ofs); break;
+	case 0x45: sprintf(buffer, "BIT 0, L=(IY+(%d))", ofs); break;
+	case 0x46: sprintf(buffer, "BIT 0, (IY+(%d))", ofs); break;
+	case 0x47: sprintf(buffer, "BIT 0, A=(IY+(%d))", ofs); break;
+	case 0x48: sprintf(buffer, "BIT 1, B=(IY+(%d))", ofs); break;
+	case 0x49: sprintf(buffer, "BIT 1, C=(IY+(%d))", ofs); break;
+	case 0x4a: sprintf(buffer, "BIT 1, D=(IY+(%d))", ofs); break;
+	case 0x4b: sprintf(buffer, "BIT 1, E=(IY+(%d))", ofs); break;
+	case 0x4c: sprintf(buffer, "BIT 1, H=(IY+(%d))", ofs); break;
+	case 0x4d: sprintf(buffer, "BIT 1, L=(IY+(%d))", ofs); break;
+	case 0x4e: sprintf(buffer, "BIT 1, (IY+(%d))", ofs); break;
+	case 0x4f: sprintf(buffer, "BIT 1, A=(IY+(%d))", ofs); break;
+	case 0x50: sprintf(buffer, "BIT 2, B=(IY+(%d))", ofs); break;
+	case 0x51: sprintf(buffer, "BIT 2, C=(IY+(%d))", ofs); break;
+	case 0x52: sprintf(buffer, "BIT 2, D=(IY+(%d))", ofs); break;
+	case 0x53: sprintf(buffer, "BIT 2, E=(IY+(%d))", ofs); break;
+	case 0x54: sprintf(buffer, "BIT 2, H=(IY+(%d))", ofs); break;
+	case 0x55: sprintf(buffer, "BIT 2, L=(IY+(%d))", ofs); break;
+	case 0x56: sprintf(buffer, "BIT 2, (IY+(%d))", ofs); break;
+	case 0x57: sprintf(buffer, "BIT 2, A=(IY+(%d))", ofs); break;
+	case 0x58: sprintf(buffer, "BIT 3, B=(IY+(%d))", ofs); break;
+	case 0x59: sprintf(buffer, "BIT 3, C=(IY+(%d))", ofs); break;
+	case 0x5a: sprintf(buffer, "BIT 3, D=(IY+(%d))", ofs); break;
+	case 0x5b: sprintf(buffer, "BIT 3, E=(IY+(%d))", ofs); break;
+	case 0x5c: sprintf(buffer, "BIT 3, H=(IY+(%d))", ofs); break;
+	case 0x5d: sprintf(buffer, "BIT 3, L=(IY+(%d))", ofs); break;
+	case 0x5e: sprintf(buffer, "BIT 3, (IY+(%d))", ofs); break;
+	case 0x5f: sprintf(buffer, "BIT 3, A=(IY+(%d))", ofs); break;
+	case 0x60: sprintf(buffer, "BIT 4, B=(IY+(%d))", ofs); break;
+	case 0x61: sprintf(buffer, "BIT 4, C=(IY+(%d))", ofs); break;
+	case 0x62: sprintf(buffer, "BIT 4, D=(IY+(%d))", ofs); break;
+	case 0x63: sprintf(buffer, "BIT 4, E=(IY+(%d))", ofs); break;
+	case 0x64: sprintf(buffer, "BIT 4, H=(IY+(%d))", ofs); break;
+	case 0x65: sprintf(buffer, "BIT 4, L=(IY+(%d))", ofs); break;
+	case 0x66: sprintf(buffer, "BIT 4, (IY+(%d))", ofs); break;
+	case 0x67: sprintf(buffer, "BIT 4, A=(IY+(%d))", ofs); break;
+	case 0x68: sprintf(buffer, "BIT 5, B=(IY+(%d))", ofs); break;
+	case 0x69: sprintf(buffer, "BIT 5, C=(IY+(%d))", ofs); break;
+	case 0x6a: sprintf(buffer, "BIT 5, D=(IY+(%d))", ofs); break;
+	case 0x6b: sprintf(buffer, "BIT 5, E=(IY+(%d))", ofs); break;
+	case 0x6c: sprintf(buffer, "BIT 5, H=(IY+(%d))", ofs); break;
+	case 0x6d: sprintf(buffer, "BIT 5, L=(IY+(%d))", ofs); break;
+	case 0x6e: sprintf(buffer, "BIT 5, (IY+(%d))", ofs); break;
+	case 0x6f: sprintf(buffer, "BIT 5, A=(IY+(%d))", ofs); break;
+	case 0x70: sprintf(buffer, "BIT 6, B=(IY+(%d))", ofs); break;
+	case 0x71: sprintf(buffer, "BIT 6, C=(IY+(%d))", ofs); break;
+	case 0x72: sprintf(buffer, "BIT 6, D=(IY+(%d))", ofs); break;
+	case 0x73: sprintf(buffer, "BIT 6, E=(IY+(%d))", ofs); break;
+	case 0x74: sprintf(buffer, "BIT 6, H=(IY+(%d))", ofs); break;
+	case 0x75: sprintf(buffer, "BIT 6, L=(IY+(%d))", ofs); break;
+	case 0x76: sprintf(buffer, "BIT 6, (IY+(%d))", ofs); break;
+	case 0x77: sprintf(buffer, "BIT 6, A=(IY+(%d))", ofs); break;
+	case 0x78: sprintf(buffer, "BIT 7, B=(IY+(%d))", ofs); break;
+	case 0x79: sprintf(buffer, "BIT 7, C=(IY+(%d))", ofs); break;
+	case 0x7a: sprintf(buffer, "BIT 7, D=(IY+(%d))", ofs); break;
+	case 0x7b: sprintf(buffer, "BIT 7, E=(IY+(%d))", ofs); break;
+	case 0x7c: sprintf(buffer, "BIT 7, H=(IY+(%d))", ofs); break;
+	case 0x7d: sprintf(buffer, "BIT 7, L=(IY+(%d))", ofs); break;
+	case 0x7e: sprintf(buffer, "BIT 7, (IY+(%d))", ofs); break;
+	case 0x7f: sprintf(buffer, "BIT 7, A=(IY+(%d))", ofs); break;
+	case 0x80: sprintf(buffer, "RES 0, B=(IY+(%d))", ofs); break;
+	case 0x81: sprintf(buffer, "RES 0, C=(IY+(%d))", ofs); break;
+	case 0x82: sprintf(buffer, "RES 0, D=(IY+(%d))", ofs); break;
+	case 0x83: sprintf(buffer, "RES 0, E=(IY+(%d))", ofs); break;
+	case 0x84: sprintf(buffer, "RES 0, H=(IY+(%d))", ofs); break;
+	case 0x85: sprintf(buffer, "RES 0, L=(IY+(%d))", ofs); break;
+	case 0x86: sprintf(buffer, "RES 0, (IY+(%d))", ofs); break;
+	case 0x87: sprintf(buffer, "RES 0, A=(IY+(%d))", ofs); break;
+	case 0x88: sprintf(buffer, "RES 1, B=(IY+(%d))", ofs); break;
+	case 0x89: sprintf(buffer, "RES 1, C=(IY+(%d))", ofs); break;
+	case 0x8a: sprintf(buffer, "RES 1, D=(IY+(%d))", ofs); break;
+	case 0x8b: sprintf(buffer, "RES 1, E=(IY+(%d))", ofs); break;
+	case 0x8c: sprintf(buffer, "RES 1, H=(IY+(%d))", ofs); break;
+	case 0x8d: sprintf(buffer, "RES 1, L=(IY+(%d))", ofs); break;
+	case 0x8e: sprintf(buffer, "RES 1, (IY+(%d))", ofs); break;
+	case 0x8f: sprintf(buffer, "RES 1, A=(IY+(%d))", ofs); break;
+	case 0x90: sprintf(buffer, "RES 2, B=(IY+(%d))", ofs); break;
+	case 0x91: sprintf(buffer, "RES 2, C=(IY+(%d))", ofs); break;
+	case 0x92: sprintf(buffer, "RES 2, D=(IY+(%d))", ofs); break;
+	case 0x93: sprintf(buffer, "RES 2, E=(IY+(%d))", ofs); break;
+	case 0x94: sprintf(buffer, "RES 2, H=(IY+(%d))", ofs); break;
+	case 0x95: sprintf(buffer, "RES 2, L=(IY+(%d))", ofs); break;
+	case 0x96: sprintf(buffer, "RES 2, (IY+(%d))", ofs); break;
+	case 0x97: sprintf(buffer, "RES 2, A=(IY+(%d))", ofs); break;
+	case 0x98: sprintf(buffer, "RES 3, B=(IY+(%d))", ofs); break;
+	case 0x99: sprintf(buffer, "RES 3, C=(IY+(%d))", ofs); break;
+	case 0x9a: sprintf(buffer, "RES 3, D=(IY+(%d))", ofs); break;
+	case 0x9b: sprintf(buffer, "RES 3, E=(IY+(%d))", ofs); break;
+	case 0x9c: sprintf(buffer, "RES 3, H=(IY+(%d))", ofs); break;
+	case 0x9d: sprintf(buffer, "RES 3, L=(IY+(%d))", ofs); break;
+	case 0x9e: sprintf(buffer, "RES 3, (IY+(%d))", ofs); break;
+	case 0x9f: sprintf(buffer, "RES 3, A=(IY+(%d))", ofs); break;
+	case 0xa0: sprintf(buffer, "RES 4, B=(IY+(%d))", ofs); break;
+	case 0xa1: sprintf(buffer, "RES 4, C=(IY+(%d))", ofs); break;
+	case 0xa2: sprintf(buffer, "RES 4, D=(IY+(%d))", ofs); break;
+	case 0xa3: sprintf(buffer, "RES 4, E=(IY+(%d))", ofs); break;
+	case 0xa4: sprintf(buffer, "RES 4, H=(IY+(%d))", ofs); break;
+	case 0xa5: sprintf(buffer, "RES 4, L=(IY+(%d))", ofs); break;
+	case 0xa6: sprintf(buffer, "RES 4, (IY+(%d))", ofs); break;
+	case 0xa7: sprintf(buffer, "RES 4, A=(IY+(%d))", ofs); break;
+	case 0xa8: sprintf(buffer, "RES 5, B=(IY+(%d))", ofs); break;
+	case 0xa9: sprintf(buffer, "RES 5, C=(IY+(%d))", ofs); break;
+	case 0xaa: sprintf(buffer, "RES 5, D=(IY+(%d))", ofs); break;
+	case 0xab: sprintf(buffer, "RES 5, E=(IY+(%d))", ofs); break;
+	case 0xac: sprintf(buffer, "RES 5, H=(IY+(%d))", ofs); break;
+	case 0xad: sprintf(buffer, "RES 5, L=(IY+(%d))", ofs); break;
+	case 0xae: sprintf(buffer, "RES 5, (IY+(%d))", ofs); break;
+	case 0xaf: sprintf(buffer, "RES 5, A=(IY+(%d))", ofs); break;
+	case 0xb0: sprintf(buffer, "RES 6, B=(IY+(%d))", ofs); break;
+	case 0xb1: sprintf(buffer, "RES 6, C=(IY+(%d))", ofs); break;
+	case 0xb2: sprintf(buffer, "RES 6, D=(IY+(%d))", ofs); break;
+	case 0xb3: sprintf(buffer, "RES 6, E=(IY+(%d))", ofs); break;
+	case 0xb4: sprintf(buffer, "RES 6, H=(IY+(%d))", ofs); break;
+	case 0xb5: sprintf(buffer, "RES 6, L=(IY+(%d))", ofs); break;
+	case 0xb6: sprintf(buffer, "RES 6, (IY+(%d))", ofs); break;
+	case 0xb7: sprintf(buffer, "RES 6, A=(IY+(%d))", ofs); break;
+	case 0xb8: sprintf(buffer, "RES 7, B=(IY+(%d))", ofs); break;
+	case 0xb9: sprintf(buffer, "RES 7, C=(IY+(%d))", ofs); break;
+	case 0xba: sprintf(buffer, "RES 7, D=(IY+(%d))", ofs); break;
+	case 0xbb: sprintf(buffer, "RES 7, E=(IY+(%d))", ofs); break;
+	case 0xbc: sprintf(buffer, "RES 7, H=(IY+(%d))", ofs); break;
+	case 0xbd: sprintf(buffer, "RES 7, L=(IY+(%d))", ofs); break;
+	case 0xbe: sprintf(buffer, "RES 7, (IY+(%d))", ofs); break;
+	case 0xbf: sprintf(buffer, "RES 7, A=(IY+(%d))", ofs); break;
+	case 0xc0: sprintf(buffer, "SET 0, B=(IY+(%d))", ofs); break;
+	case 0xc1: sprintf(buffer, "SET 0, C=(IY+(%d))", ofs); break;
+	case 0xc2: sprintf(buffer, "SET 0, D=(IY+(%d))", ofs); break;
+	case 0xc3: sprintf(buffer, "SET 0, E=(IY+(%d))", ofs); break;
+	case 0xc4: sprintf(buffer, "SET 0, H=(IY+(%d))", ofs); break;
+	case 0xc5: sprintf(buffer, "SET 0, L=(IY+(%d))", ofs); break;
+	case 0xc6: sprintf(buffer, "SET 0, (IY+(%d))", ofs); break;
+	case 0xc7: sprintf(buffer, "SET 0, A=(IY+(%d))", ofs); break;
+	case 0xc8: sprintf(buffer, "SET 1, B=(IY+(%d))", ofs); break;
+	case 0xc9: sprintf(buffer, "SET 1, C=(IY+(%d))", ofs); break;
+	case 0xca: sprintf(buffer, "SET 1, D=(IY+(%d))", ofs); break;
+	case 0xcb: sprintf(buffer, "SET 1, E=(IY+(%d))", ofs); break;
+	case 0xcc: sprintf(buffer, "SET 1, H=(IY+(%d))", ofs); break;
+	case 0xcd: sprintf(buffer, "SET 1, L=(IY+(%d))", ofs); break;
+	case 0xce: sprintf(buffer, "SET 1, (IY+(%d))", ofs); break;
+	case 0xcf: sprintf(buffer, "SET 1, A=(IY+(%d))", ofs); break;
+	case 0xd0: sprintf(buffer, "SET 2, B=(IY+(%d))", ofs); break;
+	case 0xd1: sprintf(buffer, "SET 2, C=(IY+(%d))", ofs); break;
+	case 0xd2: sprintf(buffer, "SET 2, D=(IY+(%d))", ofs); break;
+	case 0xd3: sprintf(buffer, "SET 2, E=(IY+(%d))", ofs); break;
+	case 0xd4: sprintf(buffer, "SET 2, H=(IY+(%d))", ofs); break;
+	case 0xd5: sprintf(buffer, "SET 2, L=(IY+(%d))", ofs); break;
+	case 0xd6: sprintf(buffer, "SET 2, (IY+(%d))", ofs); break;
+	case 0xd7: sprintf(buffer, "SET 2, A=(IY+(%d))", ofs); break;
+	case 0xd8: sprintf(buffer, "SET 3, B=(IY+(%d))", ofs); break;
+	case 0xd9: sprintf(buffer, "SET 3, C=(IY+(%d))", ofs); break;
+	case 0xda: sprintf(buffer, "SET 3, D=(IY+(%d))", ofs); break;
+	case 0xdb: sprintf(buffer, "SET 3, E=(IY+(%d))", ofs); break;
+	case 0xdc: sprintf(buffer, "SET 3, H=(IY+(%d))", ofs); break;
+	case 0xdd: sprintf(buffer, "SET 3, L=(IY+(%d))", ofs); break;
+	case 0xde: sprintf(buffer, "SET 3, (IY+(%d))", ofs); break;
+	case 0xdf: sprintf(buffer, "SET 3, A=(IY+(%d))", ofs); break;
+	case 0xe0: sprintf(buffer, "SET 4, B=(IY+(%d))", ofs); break;
+	case 0xe1: sprintf(buffer, "SET 4, C=(IY+(%d))", ofs); break;
+	case 0xe2: sprintf(buffer, "SET 4, D=(IY+(%d))", ofs); break;
+	case 0xe3: sprintf(buffer, "SET 4, E=(IY+(%d))", ofs); break;
+	case 0xe4: sprintf(buffer, "SET 4, H=(IY+(%d))", ofs); break;
+	case 0xe5: sprintf(buffer, "SET 4, L=(IY+(%d))", ofs); break;
+	case 0xe6: sprintf(buffer, "SET 4, (IY+(%d))", ofs); break;
+	case 0xe7: sprintf(buffer, "SET 4, A=(IY+(%d))", ofs); break;
+	case 0xe8: sprintf(buffer, "SET 5, B=(IY+(%d))", ofs); break;
+	case 0xe9: sprintf(buffer, "SET 5, C=(IY+(%d))", ofs); break;
+	case 0xea: sprintf(buffer, "SET 5, D=(IY+(%d))", ofs); break;
+	case 0xeb: sprintf(buffer, "SET 5, E=(IY+(%d))", ofs); break;
+	case 0xec: sprintf(buffer, "SET 5, H=(IY+(%d))", ofs); break;
+	case 0xed: sprintf(buffer, "SET 5, L=(IY+(%d))", ofs); break;
+	case 0xee: sprintf(buffer, "SET 5, (IY+(%d))", ofs); break;
+	case 0xef: sprintf(buffer, "SET 5, A=(IY+(%d))", ofs); break;
+	case 0xf0: sprintf(buffer, "SET 6, B=(IY+(%d))", ofs); break;
+	case 0xf1: sprintf(buffer, "SET 6, C=(IY+(%d))", ofs); break;
+	case 0xf2: sprintf(buffer, "SET 6, D=(IY+(%d))", ofs); break;
+	case 0xf3: sprintf(buffer, "SET 6, E=(IY+(%d))", ofs); break;
+	case 0xf4: sprintf(buffer, "SET 6, H=(IY+(%d))", ofs); break;
+	case 0xf5: sprintf(buffer, "SET 6, L=(IY+(%d))", ofs); break;
+	case 0xf6: sprintf(buffer, "SET 6, (IY+(%d))", ofs); break;
+	case 0xf7: sprintf(buffer, "SET 6, A=(IY+(%d))", ofs); break;
+	case 0xf8: sprintf(buffer, "SET 7, B=(IY+(%d))", ofs); break;
+	case 0xf9: sprintf(buffer, "SET 7, C=(IY+(%d))", ofs); break;
+	case 0xfa: sprintf(buffer, "SET 7, D=(IY+(%d))", ofs); break;
+	case 0xfb: sprintf(buffer, "SET 7, E=(IY+(%d))", ofs); break;
+	case 0xfc: sprintf(buffer, "SET 7, H=(IY+(%d))", ofs); break;
+	case 0xfd: sprintf(buffer, "SET 7, L=(IY+(%d))", ofs); break;
+	case 0xfe: sprintf(buffer, "SET 7, (IY+(%d))", ofs); break;
+	case 0xff: sprintf(buffer, "SET 7, A=(IY+(%d))", ofs); break;
+#if defined(_MSC_VER) && (_MSC_VER >= 1200)
+	default: __assume(0);
+#endif
+	}
+}
+
+void debug()
+{
+	char buffer[256];
+	dasm(PC, buffer);
+	fprintf(stderr,
+	"F = [%c%c%c%c%c%c%c%c]  A = %02X  BC = %04X  DE = %04X  HL = %04X  IX = %04X  IY = %04X\n"
+	"F'= [%c%c%c%c%c%c%c%c]  A'= %02X  BC'= %04X  DE'= %04X  HL'= %04X  SP = %04X  PC = %04X\n"
+	"        I = %02X  R = %02X (BC)= %04X (DE)= %04X (HL)= %04X (SP)= %04X  %cI:IFF2=%d\n"
+	"%s\n",
+	(F & CF) ? 'C' : '-', (F & NF) ? 'N' : '-', (F & PF) ? 'P' : '-', (F & XF) ? 'X' : '-',
+	(F & HF) ? 'H' : '-', (F & YF) ? 'Y' : '-', (F & ZF) ? 'Z' : '-', (F & SF) ? 'S' : '-',
+	A, BC, DE, HL, IX, IY,
+	(F2 & CF) ? 'C' : '-', (F2 & NF) ? 'N' : '-', (F2 & PF) ? 'P' : '-', (F2 & XF) ? 'X' : '-',
+	(F2 & HF) ? 'H' : '-', (F2 & YF) ? 'Y' : '-', (F2 & ZF) ? 'Z' : '-', (F2 & SF) ? 'S' : '-',
+	A2, BC2, DE2, HL2, SP, PC,
+	I, R,
+	RM16(BC), RM16(DE), RM16(HL), RM16(SP),
+	iff1 ? 'E' : 'D', iff2,
+	buffer);
+}
+#endif
