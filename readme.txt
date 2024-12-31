@@ -1,6 +1,6 @@
 CP/M Player for Win32 console
 MSX-DOS Player for Win32 console
-								10/06/2024
+								12/31/2024
 
 ----- What's this
 
@@ -17,7 +17,7 @@ For example compiling sample.c with Small-C:
 	> CPM CC SAMPLE.C
 
 Current directory is recognized as A drive.
-To use B-P drive, create the dierctory named B-Z.
+To use B-P drive, create the sub-dierctory named B-P.
 
 
 ----------------------------------------

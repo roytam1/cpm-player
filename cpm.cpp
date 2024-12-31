@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <conio.h>
+#include <direct.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -933,6 +934,10 @@ void cpm_bdos()
 		if((drive = cpm_get_drive(DE)) < MAX_DRIVES) {
 			if(!read_only[drive]) {
 				login_drive |= 1 << drive;
+				if(drive > 1) {
+					sprintf(path, "%c", 'A' + (drive - 1));
+					_mkdir(path);
+				}
 				cpm_create_path(drive, cpm_get_mem_array(DE + 1), path);
 //				if(RM8(DE + 12) == 0) {
 					cpm_close_file(path); // just in case
@@ -1654,7 +1659,7 @@ void cpm_create_path(int drive, const uint8* src, char* dest)
 	}
 	ext[3] = '\0';
 	if(drive > 1) {
-		sprintf(dest, "%c\\%s.%s", 'A' + drive, file, ext);
+		sprintf(dest, "%c\\%s.%s", 'A' + (drive - 1), file, ext);
 	} else {
 		sprintf(dest, "%s.%s", file, ext);
 	}
@@ -3573,7 +3578,6 @@ inline uint8 SET(uint8 bit, uint8 value)
 
 void OP_CB(uint8 code)
 {
-	
 	switch(code) {
 	case 0x00: B = RLC(B); break;			/* RLC  B           */
 	case 0x01: C = RLC(C); break;			/* RLC  C           */
@@ -3839,7 +3843,6 @@ void OP_CB(uint8 code)
 
 void OP_XY(uint8 code)
 {
-	
 	switch(code) {
 	case 0x00: B = RLC(RM8(ea)); WM8(ea, B); break;		/* RLC  B=(XY+o)    */
 	case 0x01: C = RLC(RM8(ea)); WM8(ea, C); break;		/* RLC  C=(XY+o)    */
@@ -4105,7 +4108,6 @@ void OP_XY(uint8 code)
 
 void OP_DD(uint8 code)
 {
-	
 	switch(code) {
 	case 0x09: ADD16(ix, bc); break;				/* ADD  IX,BC       */
 	case 0x19: ADD16(ix, de); break;				/* ADD  IX,DE       */
@@ -4199,7 +4201,6 @@ void OP_DD(uint8 code)
 
 void OP_FD(uint8 code)
 {
-	
 	switch(code) {
 	case 0x09: ADD16(iy, bc); break;				/* ADD  IY,BC       */
 	case 0x19: ADD16(iy, de); break;				/* ADD  IY,DE       */
@@ -4293,7 +4294,6 @@ void OP_FD(uint8 code)
 
 void OP_ED(uint8 code)
 {
-	
 	switch(code) {
 	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; break;			/* IN   B,(C)       */
 	case 0x41: OUT8(BC, B); break;						/* OUT  (C),B       */
