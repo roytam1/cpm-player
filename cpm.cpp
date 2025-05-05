@@ -16,12 +16,19 @@
 #include <sys/stat.h>
 #include <io.h>
 #include <mbctype.h>
+#include <time.h>
 #include "cpm.h"
 
 //#define DEBUG_LOG
 #ifdef DEBUG_LOG
 void debug();
 #endif
+
+uint8 packBCD(uint8 x)
+{
+    return (uint8) ( ( ( x / 10 ) << 4 ) | ( x % 10 ) );
+} //packBCD
+
 
 #ifdef _MSX
 uint32 get_crc32(uint8 data[], int size)
@@ -570,9 +577,9 @@ void cpm_bdos()
 	uint8 name[11];
 	int len, drive, size;
 	uint32 record;
+	SYSTEMTIME sTime;
 #ifdef _MSX
 	uint8 buffer[0x10000];
-	SYSTEMTIME sTime;
 #else
 	uint8 buffer[128];
 #endif
@@ -1318,6 +1325,35 @@ void cpm_bdos()
 		}
 		break;
 #endif
+	case 0x69: /* 105 - get date/time (CP/M 3), DE=address of time stamp. Returns A=seconds (packed BCD). */
+	{
+		time_t now_ts;
+		tm lpTime;
+
+		uint16 day; // day 1 is 1 January 1978
+		uint8 hour; // packed bcd (nibbles for each digit)
+		uint8 minute; // packed bcd
+
+		GetLocalTime(&sTime);
+		lpTime.tm_sec = sTime.wSecond;
+		lpTime.tm_min = sTime.wMinute;
+		lpTime.tm_hour = sTime.wHour;
+		lpTime.tm_mday = sTime.wDay;
+		lpTime.tm_mon = sTime.wMonth - 1;
+		lpTime.tm_year = sTime.wYear - 1900;
+		lpTime.tm_isdst = -1;
+
+		now_ts = mktime(&lpTime);
+		day = now_ts / 86400 - 2920;
+		hour = packBCD(sTime.wHour);
+		minute = packBCD(sTime.wMinute);
+
+		WM16(DE, day);
+		WM8(DE + 2, hour);
+		WM8(DE + 3, minute);
+		A  = (uint8)packBCD(sTime.wSecond);
+	}
+		break;
 	default:
 //		fprintf(stderr, "BDOS %02Xh\n", C);
 //		exit(1);
