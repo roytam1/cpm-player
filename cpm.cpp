@@ -1327,12 +1327,22 @@ void cpm_bdos()
 #endif
 	case 0x69: /* 105 - get date/time (CP/M 3), DE=address of time stamp. Returns A=seconds (packed BCD). */
 	{
-		time_t now_ts;
-		tm lpTime;
+		struct tm lpTime, lpTime_begin;
+		time_t now_ts, ts_begin;
 
 		uint16 day; // day 1 is 1 January 1978
 		uint8 hour; // packed bcd (nibbles for each digit)
 		uint8 minute; // packed bcd
+
+		lpTime_begin.tm_sec = 0;
+		lpTime_begin.tm_min = 0;
+		lpTime_begin.tm_hour = 0;
+		lpTime_begin.tm_mday = 31;
+		lpTime_begin.tm_mon = 11;
+		lpTime_begin.tm_year = 77;
+		lpTime_begin.tm_isdst = -1;
+
+		ts_begin = mktime(&lpTime_begin);
 
 		GetLocalTime(&sTime);
 		lpTime.tm_sec = sTime.wSecond;
@@ -1344,7 +1354,7 @@ void cpm_bdos()
 		lpTime.tm_isdst = -1;
 
 		now_ts = mktime(&lpTime);
-		day = now_ts / 86400 - 2920;
+		day = (now_ts-ts_begin) / 86400;
 		hour = packBCD(sTime.wHour);
 		minute = packBCD(sTime.wMinute);
 
