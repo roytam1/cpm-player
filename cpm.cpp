@@ -24,12 +24,6 @@
 void debug();
 #endif
 
-uint8 packBCD(uint8 x)
-{
-    return (uint8) ( ( ( x / 10 ) << 4 ) | ( x % 10 ) );
-} //packBCD
-
-
 #ifdef _MSX
 uint32 get_crc32(uint8 data[], int size)
 {
@@ -82,6 +76,11 @@ BOOL WINAPI ctrl_handler(DWORD dwCtrlType)
 		SetConsoleCtrlHandler(ctrl_handler, FALSE);
 	}
 	return FALSE;
+}
+#else
+uint8 packBCD(uint16 x)
+{
+	return (uint8)(((x / 10) << 4) | (x % 10));
 }
 #endif
 
@@ -577,12 +576,14 @@ void cpm_bdos()
 	uint8 name[11];
 	int len, drive, size;
 	uint32 record;
-	SYSTEMTIME sTime;
 #ifdef _MSX
 	uint8 buffer[0x10000];
 #else
 	uint8 buffer[128];
+	struct tm time;
+	time_t ts_now, ts_begin;
 #endif
+	SYSTEMTIME sTime;
 	WIN32_FIND_DATA find;
 	HANDLE hFind;
 	int fd;
@@ -1316,6 +1317,30 @@ void cpm_bdos()
 		}
 		A = 0;
 		break;
+	case 0x69:
+		// 105 - get date/time (CP/M 3), DE=address of time stamp. Returns A=seconds (packed BCD).
+		time.tm_sec = 0;
+		time.tm_min = 0;
+		time.tm_hour = 0;
+		time.tm_mday = 31;
+		time.tm_mon = 11;
+		time.tm_year = 77;
+		time.tm_isdst = -1;
+		ts_begin = mktime(&time);
+		GetLocalTime(&sTime);
+		time.tm_sec = sTime.wSecond;
+		time.tm_min = sTime.wMinute;
+		time.tm_hour = sTime.wHour;
+		time.tm_mday = sTime.wDay;
+		time.tm_mon = sTime.wMonth - 1;
+		time.tm_year = sTime.wYear - 1900;
+		time.tm_isdst = -1;
+		ts_now = mktime(&time);
+		WM16(DE, (uint16)((ts_now - ts_begin) / 86400));
+		WM8(DE + 2, packBCD(sTime.wHour));
+		WM8(DE + 3, packBCD(sTime.wMinute));
+		A = packBCD(sTime.wSecond);
+		break;
 	case 0x6e:
 		// get/set string delimiter
 		if(DE == 0xffff) {
@@ -1325,45 +1350,6 @@ void cpm_bdos()
 		}
 		break;
 #endif
-	case 0x69: /* 105 - get date/time (CP/M 3), DE=address of time stamp. Returns A=seconds (packed BCD). */
-	{
-		struct tm lpTime, lpTime_begin;
-		time_t now_ts, ts_begin;
-
-		uint16 day; // day 1 is 1 January 1978
-		uint8 hour; // packed bcd (nibbles for each digit)
-		uint8 minute; // packed bcd
-
-		lpTime_begin.tm_sec = 0;
-		lpTime_begin.tm_min = 0;
-		lpTime_begin.tm_hour = 0;
-		lpTime_begin.tm_mday = 31;
-		lpTime_begin.tm_mon = 11;
-		lpTime_begin.tm_year = 77;
-		lpTime_begin.tm_isdst = -1;
-
-		ts_begin = mktime(&lpTime_begin);
-
-		GetLocalTime(&sTime);
-		lpTime.tm_sec = sTime.wSecond;
-		lpTime.tm_min = sTime.wMinute;
-		lpTime.tm_hour = sTime.wHour;
-		lpTime.tm_mday = sTime.wDay;
-		lpTime.tm_mon = sTime.wMonth - 1;
-		lpTime.tm_year = sTime.wYear - 1900;
-		lpTime.tm_isdst = -1;
-
-		now_ts = mktime(&lpTime);
-		day = (now_ts-ts_begin) / 86400;
-		hour = packBCD(sTime.wHour);
-		minute = packBCD(sTime.wMinute);
-
-		WM16(DE, day);
-		WM8(DE + 2, hour);
-		WM8(DE + 3, minute);
-		A  = (uint8)packBCD(sTime.wSecond);
-	}
-		break;
 	default:
 //		fprintf(stderr, "BDOS %02Xh\n", C);
 //		exit(1);
@@ -4345,48 +4331,48 @@ void OP_FD(uint8 code)
 void OP_ED(uint8 code)
 {
 	switch(code) {
-	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; WZ = BC + 1; break;			/* IN   B,(C)       */
-	case 0x41: OUT8(BC, B); WZ = BC + 1; break;						/* OUT  (C),B       */
+	case 0x40: B = IN8(BC); F = (F & CF) | SZP[B]; WZ = BC + 1; break;	/* IN   B,(C)       */
+	case 0x41: OUT8(BC, B); WZ = BC + 1; break;				/* OUT  (C),B       */
 	case 0x42: SBC16(bc); break;						/* SBC  HL,BC       */
 	case 0x43: ea = FETCH16(); WM16p(ea, &bc); WZ = ea + 1; break;		/* LD   (w),BC      */
 	case 0x44: NEG(); break;						/* NEG              */
 	case 0x45: RETN(); break;						/* RETN             */
 	case 0x46: im = 0; break;						/* im   0           */
 	case 0x47: LD_I_A(); break;						/* LD   i,A         */
-	case 0x48: C = IN8(BC); F = (F & CF) | SZP[C]; WZ = BC + 1; break;			/* IN   C,(C)       */
-	case 0x49: OUT8(BC, C); WZ = BC + 1; break;						/* OUT  (C),C       */
+	case 0x48: C = IN8(BC); F = (F & CF) | SZP[C]; WZ = BC + 1; break;	/* IN   C,(C)       */
+	case 0x49: OUT8(BC, C); WZ = BC + 1; break;				/* OUT  (C),C       */
 	case 0x4a: ADC16(bc); break;						/* ADC  HL,BC       */
 	case 0x4b: ea = FETCH16(); RM16p(ea, &bc); WZ = ea + 1; break;		/* LD   BC,(w)      */
 	case 0x4c: NEG(); break;						/* NEG              */
 	case 0x4d: RETI(); break;						/* RETI             */
 	case 0x4e: im = 0; break;						/* im   0           */
 	case 0x4f: LD_R_A(); break;						/* LD   r,A         */
-	case 0x50: D = IN8(BC); F = (F & CF) | SZP[D]; WZ = BC + 1; break;			/* IN   D,(C)       */
-	case 0x51: OUT8(BC, D); WZ = BC + 1; break;						/* OUT  (C),D       */
+	case 0x50: D = IN8(BC); F = (F & CF) | SZP[D]; WZ = BC + 1; break;	/* IN   D,(C)       */
+	case 0x51: OUT8(BC, D); WZ = BC + 1; break;				/* OUT  (C),D       */
 	case 0x52: SBC16(de); break;						/* SBC  HL,DE       */
 	case 0x53: ea = FETCH16(); WM16p(ea, &de); WZ = ea + 1; break;		/* LD   (w),DE      */
 	case 0x54: NEG(); break;						/* NEG              */
 	case 0x55: RETN(); break;						/* RETN             */
 	case 0x56: im = 1; break;						/* im   1           */
 	case 0x57: LD_A_I(); break;						/* LD   A,i         */
-	case 0x58: E = IN8(BC); F = (F & CF) | SZP[E]; WZ = BC + 1; break;			/* IN   E,(C)       */
-	case 0x59: OUT8(BC, E); WZ = BC + 1; break;						/* OUT  (C),E       */
+	case 0x58: E = IN8(BC); F = (F & CF) | SZP[E]; WZ = BC + 1; break;	/* IN   E,(C)       */
+	case 0x59: OUT8(BC, E); WZ = BC + 1; break;				/* OUT  (C),E       */
 	case 0x5a: ADC16(de); break;						/* ADC  HL,DE       */
 	case 0x5b: ea = FETCH16(); RM16p(ea, &de); WZ = ea + 1; break;		/* LD   DE,(w)      */
 	case 0x5c: NEG(); break;						/* NEG              */
 	case 0x5d: RETI(); break;						/* RETI             */
 	case 0x5e: im = 2; break;						/* im   2           */
 	case 0x5f: LD_A_R(); break;						/* LD   A,r         */
-	case 0x60: H = IN8(BC); F = (F & CF) | SZP[H]; WZ = BC + 1; break;			/* IN   H,(C)       */
-	case 0x61: OUT8(BC, H); WZ = BC + 1; break;						/* OUT  (C),H       */
+	case 0x60: H = IN8(BC); F = (F & CF) | SZP[H]; WZ = BC + 1; break;	/* IN   H,(C)       */
+	case 0x61: OUT8(BC, H); WZ = BC + 1; break;				/* OUT  (C),H       */
 	case 0x62: SBC16(hl); break;						/* SBC  HL,HL       */
 	case 0x63: ea = FETCH16(); WM16p(ea, &hl); WZ = ea + 1; break;		/* LD   (w),HL      */
 	case 0x64: NEG(); break;						/* NEG              */
 	case 0x65: RETN(); break;						/* RETN             */
 	case 0x66: im = 0; break;						/* im   0           */
 	case 0x67: RRD(); break;						/* RRD  (HL)        */
-	case 0x68: L = IN8(BC); F = (F & CF) | SZP[L]; WZ = BC + 1; break;			/* IN   L,(C)       */
-	case 0x69: OUT8(BC, L); WZ = BC + 1; break;						/* OUT  (C),L       */
+	case 0x68: L = IN8(BC); F = (F & CF) | SZP[L]; WZ = BC + 1; break;	/* IN   L,(C)       */
+	case 0x69: OUT8(BC, L); WZ = BC + 1; break;				/* OUT  (C),L       */
 	case 0x6a: ADC16(hl); break;						/* ADC  HL,HL       */
 	case 0x6b: ea = FETCH16(); RM16p(ea, &hl); WZ = ea + 1; break;		/* LD   HL,(w)      */
 	case 0x6c: NEG(); break;						/* NEG              */
@@ -4394,7 +4380,7 @@ void OP_ED(uint8 code)
 	case 0x6e: im = 0; break;						/* im   0           */
 	case 0x6f: RLD(); break;						/* RLD  (HL)        */
 	case 0x70: {uint8 res = IN8(BC); F = (F & CF) | SZP[res]; WZ = BC + 1;} break;	/* IN   F,(C)       */
-	case 0x71: OUT8(BC, 0); WZ = BC + 1; break;						/* OUT  (C),0       */
+	case 0x71: OUT8(BC, 0); WZ = BC + 1; break;				/* OUT  (C),0       */
 	case 0x72: SBC16(sp); break;						/* SBC  HL,SP       */
 	case 0x73: ea = FETCH16(); WM16p(ea, &sp); WZ = ea + 1; break;		/* LD   (w),SP      */
 	case 0x74: NEG(); break;						/* NEG              */
